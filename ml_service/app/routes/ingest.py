@@ -10,6 +10,7 @@ Flow per message:
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 from datetime import datetime
@@ -34,7 +35,10 @@ router = APIRouter()
 RAW_TABLE = "raw_sms"
 
 # Local CSV path (relative to working directory of uvicorn launch)
-CSV_FILE = "captured_sms.csv"
+CSV_FILE = "data/captured_sms.csv"
+
+# Sync checkpoint: tracks last timestamp_ms per device_id
+SYNC_STATE_FILE = "data/sync_state.json"
 
 
 # -------------------------------------------------------
@@ -166,6 +170,9 @@ async def ingest_single(payload: SmsPayload):
         save_to_csv(record)
         logger.info("✅ Saved to CSV: id=%s sender=%s", payload.id, payload.sender)
 
+        # Track sync checkpoint
+        _update_sync_timestamp(payload.device_id, payload.timestamp_ms)
+
         # 2. Supabase (only for financial transactions; failure is non-fatal)
         transaction_id: Optional[str] = None
         if parsed.is_financial:
@@ -242,6 +249,15 @@ async def ingest_bulk(payloads: List[SmsPayload]):
     except Exception as exc:
         logger.error("Failed to write batch to CSV: %s", exc)
         errors.append(f"CSV_WRITE_ERROR: {exc!s}")
+
+    # Track sync checkpoint — use the latest timestamp from the batch
+    if payloads:
+        latest_ts = max(
+            (p.timestamp_ms for p in payloads),
+            key=lambda t: int(float(t)) if t else 0,
+            default=0,
+        )
+        _update_sync_timestamp(payloads[0].device_id, latest_ts)
 
     return BulkIngestResponse(
         total=len(payloads),
@@ -379,6 +395,80 @@ async def reparse_record(record_id: str):
         "status":    "reparsed",
         "record_id": record_id,
         "parsed":    parsed,
+    }
+
+
+# -------------------------------------------------------
+# Sync state helpers
+# -------------------------------------------------------
+
+def _read_sync_state() -> dict:
+    """Read the sync state JSON file. Returns {device_id: last_timestamp_ms}."""
+    if not os.path.isfile(SYNC_STATE_FILE):
+        return {}
+    try:
+        with open(SYNC_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def _write_sync_state(state: dict) -> None:
+    """Persist the sync state to disk."""
+    os.makedirs(os.path.dirname(SYNC_STATE_FILE), exist_ok=True)
+    with open(SYNC_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def _update_sync_timestamp(device_id: str, timestamp_ms) -> None:
+    """Update the last-synced timestamp for a device if it's newer."""
+    try:
+        ts = int(float(timestamp_ms))
+    except (TypeError, ValueError):
+        return
+    state = _read_sync_state()
+    current = state.get(device_id, 0)
+    if ts > current:
+        state[device_id] = ts
+        _write_sync_state(state)
+
+
+# -------------------------------------------------------
+# GET /api/data/last-sync — Sync checkpoint for Android app
+# -------------------------------------------------------
+
+@router.get("/api/data/last-sync")
+async def get_last_sync(
+    device_id: str = Query(..., description="Device ID to check sync state for"),
+):
+    """
+    Returns the timestamp (epoch ms) of the last SMS received from this device.
+    The Android app should call this before bulk sync and only send
+    messages with timestamp_ms > last_sync_timestamp.
+
+    Response:
+        {
+            "device_id": "d4d93bcf95df41a4",
+            "last_sync_timestamp": 1778242012162,
+            "last_sync_human": "2026-05-08 17:36:52"
+        }
+
+    If no data has been synced yet, last_sync_timestamp will be 0.
+    """
+    state = _read_sync_state()
+    last_ts = state.get(device_id, 0)
+
+    human = ""
+    if last_ts > 0:
+        try:
+            human = datetime.fromtimestamp(last_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, ValueError):
+            human = "unknown"
+
+    return {
+        "device_id": device_id,
+        "last_sync_timestamp": last_ts,
+        "last_sync_human": human,
     }
 
 

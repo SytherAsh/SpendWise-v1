@@ -73,10 +73,14 @@ def get_or_create_account(bank_name: Optional[str], account_suffix: Optional[str
     account_suffix = safe_value(account_suffix)
 
     try:
-        query = supabase.table("accounts").select("id").eq("bank_name", bank_name)
-        if account_suffix:
-            query = query.eq("account_suffix", account_suffix)
-        res = query.limit(1).execute()
+        # account_suffix column does not exist in the current schema — query by bank_name only
+        res = (
+            supabase.table("accounts")
+            .select("id")
+            .eq("bank_name", bank_name)
+            .limit(1)
+            .execute()
+        )
 
         if res.data:
             return res.data[0]["id"]
@@ -86,8 +90,7 @@ def get_or_create_account(bank_name: Optional[str], account_suffix: Optional[str
             "bank_name": bank_name,
             "account_type": "SAVINGS",
         }
-        if account_suffix:
-            payload["account_suffix"] = account_suffix
+        # NOTE: add account_suffix to payload once the column exists in Supabase
 
         new = supabase.table("accounts").insert(payload).execute()
         account_id = new.data[0]["id"]
@@ -172,7 +175,6 @@ def transaction_exists(
     direction: Optional[str],
     transaction_date: Optional[str],
     ref_id: Optional[str] = None,
-    body_hash: Optional[str] = None,
 ) -> bool:
     """
     Check for a duplicate transaction before inserting.
@@ -257,20 +259,31 @@ def insert_transaction(
         direction = safe_value(row.get("direction")) or safe_value(row.get("dr_cr_indicator"))
         indicator = _direction_to_indicator(direction) if direction in ("DEBIT", "CREDIT") else safe_value(direction)
 
-        amount = safe_value(row.get("amount"))
-        debit  = amount if indicator == "DR" else None
-        credit = amount if indicator == "CR" else None
+        # Always use absolute value for calculations to be robust against signed inputs
+        amount_raw = abs(float(safe_value(row.get("amount")) or 0.0))
+        debit_val  = amount_raw if indicator == "DR" else 0.0
+        credit_val = amount_raw if indicator == "CR" else 0.0
+        
+        # Signed amount: DR must be negative, CR must be positive per transactions_amount_consistency_chk
+        final_amount = credit_val - debit_val
+
+        # Validate transaction_mode against allowed list:
+        # 'UPI','INB','NEFT','IMPS','CARD','CASH','NETBANKING','ACH','ATM','POS','RTGS','OTHER'
+        allowed_modes = {"UPI", "INB", "NEFT", "IMPS", "CARD", "CASH", "NETBANKING", "ACH", "ATM", "POS", "RTGS"}
+        mode = str(safe_value(row.get("transaction_mode")) or "OTHER").upper()
+        if mode not in allowed_modes:
+            mode = "OTHER"
 
         payload: Dict[str, Any] = {
             "account_id":            account_id,
             "recipient_id":          recipient_id,
             "transaction_reference": safe_value(row.get("ref_id")) or safe_value(row.get("transaction_reference")),
             "transaction_date":      safe_value(row.get("transaction_date")),
-            "amount":                amount,
-            "debit":                 safe_value(row.get("debit")) or debit,
-            "credit":                safe_value(row.get("credit")) or credit,
-            "balance":               safe_value(row.get("balance_after")) or safe_value(row.get("balance")),
-            "transaction_mode":      safe_value(row.get("transaction_mode")),
+            "amount":                final_amount,
+            "debit":                 debit_val,
+            "credit":                credit_val,
+            "balance":               safe_value(row.get("balance_after")) or safe_value(row.get("balance")) or 0.0,
+            "transaction_mode":      mode,
             "dr_cr_indicator":       indicator,
             "note":                  safe_value(row.get("note")) or safe_value(row.get("body")),
         }
@@ -279,7 +292,7 @@ def insert_transaction(
         if res.data:
             logger.info(
                 "Inserted transaction | id=%s | amount=%.2f | dir=%s",
-                res.data[0].get("id"), amount or 0.0, indicator,
+                res.data[0].get("id"), final_amount, indicator,
             )
             return res.data[0]
         return None

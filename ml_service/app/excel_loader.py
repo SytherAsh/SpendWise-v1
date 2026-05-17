@@ -4,7 +4,8 @@ import numpy as np
 
 def load_transactions_from_excel(file_path: str):
     df = pd.read_excel(file_path)
-    df=df.iloc[:10]
+    # df = df.iloc[:10]  <-- Removed limit for full migration
+
    
     transactions = []
    

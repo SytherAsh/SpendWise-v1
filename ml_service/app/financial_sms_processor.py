@@ -29,9 +29,9 @@ class FinancialSmsProcessor:
 
     def __init__(
         self,
-        input_file: str = "captured_sms.csv",
-        output_file: str = "clean_sms_eda.csv",
-        financial_output_file: str = "true_financial_sms.csv",
+        input_file: str = "data/captured_sms.csv",
+        output_file: str = "data/clean_sms_eda.csv",
+        financial_output_file: str = "data/true_financial_sms.csv",
     ):
         self.input_file            = input_file
         self.output_file           = output_file
@@ -43,84 +43,31 @@ class FinancialSmsProcessor:
 
     def _parse_financial_sms(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Use centralized regex from sms_parser to extract precise financial
-        details and accurately segregate financial from non-financial messages.
-
-        Prefers the hardened sms_parser logic over inline regex; falls back
-        gracefully if the import fails.
+        Use centralized logic from sms_parser to extract precise financial details.
+        This guarantees the CSV perfectly matches what goes into Supabase.
         """
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+        from app.sms_parser import parse_sms_body
+
         df["body"]   = df["body"].fillna("").astype(str)
         df["sender"] = df["sender"].fillna("").astype(str)
 
-        # -- Ad / spam detection (body + sender level) --
-        ad_keywords_body = re.compile(
-            r"(?:recharge|data\s*pack|data\s*loan|validity|playlist|subscription|claim"
-            r"|OTT|netflix|jiohotstar|zee5|apple\s*music|free\s*access|call\s*alert"
-            r"|hello\s*tune|missed\s*call|offer\s*expires|cashback\s*offer|discount\s*code)",
-            re.IGNORECASE,
-        )
-        ad_sender = re.compile(
-            r"(?:AIRTEL|JIO|VI|650025|BURKIN|ZUDIO|PTRENG|TATASKY|TATSKY|AMAZON)",
-            re.IGNORECASE,
-        )
+        # Apply the parser
+        parsed_results = df.apply(lambda row: parse_sms_body(row["body"], row["sender"]), axis=1)
 
-        # -- Amount extraction --
-        # Handles: Rs.500, Rs 1,500.00, INR 2000, ₹3,000.50, "debited by 500"
-        amount_pattern     = r"(?:Rs\.?\s*|INR\s*|₹\s*)([0-9,]+(?:\.[0-9]{1,2})?)"
-        alt_amount_pattern = r"(?:debited by|credited (?:with|by))\s+([0-9,]+(?:\.[0-9]{1,2})?)"
+        # Extract to columns
+        df["parsed_is_financial"] = [p.is_financial for p in parsed_results]
+        df["parsed_amount"]       = [p.amount for p in parsed_results]
+        df["parsed_direction"]    = [p.direction for p in parsed_results]
+        df["parsed_ref_id"]       = [p.ref_id for p in parsed_results]
+        df["parsed_entity"]       = [p.recipient_name for p in parsed_results]
+        df["parsed_bank"]         = [p.bank for p in parsed_results]
 
-        amt_match      = df["body"].str.extract(amount_pattern, flags=re.IGNORECASE)[0]
-        alt_amt_match  = df["body"].str.extract(alt_amount_pattern, flags=re.IGNORECASE)[0]
-        df["parsed_amount"] = amt_match.fillna(alt_amt_match)
-        df["parsed_amount"] = pd.to_numeric(
-            df["parsed_amount"].str.replace(",", "", regex=False), errors="coerce"
-        )
-
-        # -- Direction extraction --
-        debit_kw  = r"(?i)\b(?:debited?|deducted|paid|spent|withdrawn?|withdraw|transferred?|purchase(?:d)?|charged)\b"
-        credit_kw = r"(?i)\b(?:credited?|received|added|refunded?|cashback|reversed|deposited)\b"
-
-        conditions = [
-            df["body"].str.contains(debit_kw,  na=False, regex=True),
-            df["body"].str.contains(credit_kw, na=False, regex=True),
-        ]
-        choices = ["DEBIT", "CREDIT"]
-        df["parsed_direction"] = np.select(conditions, choices, default=None)
-        df["parsed_direction"]  = df["parsed_direction"].replace("None", None)
-
-        # -- Reference ID extraction --
-        ref_pattern = (
-            r"(?:Ref(?:\s*No)?|RefNo|Txn\s*(?:ID|No\.?)|Transaction\s*ID"
-            r"|UPI\s*Ref|TxnNo|UTR|IMPS\s*Ref)[:\s-]*([A-Za-z0-9]{6,20})"
-        )
-        df["parsed_ref_id"] = df["body"].str.extract(ref_pattern, flags=re.IGNORECASE)[0]
-
-        # -- Entity / recipient extraction --
-        entity_debit_pattern  = (
-            r"(?:trf\s+to|transfer(?:red)?\s+to|paid\s+to|sent\s+to|to)\s+"
-            r"([A-Za-z][A-Za-z0-9 &'._-]{1,35})"
-        )
-        entity_credit_pattern = (
-            r"(?:from|received\s+from|credited\s+(?:from|by)|by\s+a/c\s+linked\s+to)\s+"
-            r"([A-Za-z][A-Za-z0-9 &'._-]{1,35})"
-        )
-        ent_debit  = df["body"].str.extract(entity_debit_pattern,  flags=re.IGNORECASE)[0]
-        ent_credit = df["body"].str.extract(entity_credit_pattern, flags=re.IGNORECASE)[0]
-
-        sender_clean = df["sender"].str.replace(r"^[A-Z]{2}-|-?[A-Z]$", "", regex=True)
-        df["parsed_entity"] = ent_debit.fillna(ent_credit).fillna(sender_clean)
-
-        # -- Final financial label --
-        is_ad = (
-            df["body"].str.contains(ad_keywords_body, na=False)
-            | df["sender"].str.contains(ad_sender, na=False)
-        )
-        has_financial_info = (
-            df["parsed_amount"].notna()
-            & df["parsed_direction"].notna()
-            & (df["parsed_amount"] > 0)
-        )
-        df["parsed_is_financial"] = has_financial_info & (~is_ad)
+        # Fix the recipient and entity columns to use the properly cleaned entity
+        df["recipient"] = df["parsed_entity"]
+        df["entity"] = df["parsed_entity"]
 
         return df
 
@@ -171,11 +118,6 @@ class FinancialSmsProcessor:
         if invalid.any():
             print(f"Dropped {invalid.sum()} records with missing/invalid timestamps.")
             df = df[~invalid]
-
-        # 4. Year filter (2026 only)
-        pre_year = len(df)
-        df = df[df["parsed_datetime"].dt.year == 2026].copy()
-        print(f"Dropped {pre_year - len(df)} records not from 2026.")
 
         df = df.sort_values("parsed_datetime", ascending=True)
         df["date"] = df["parsed_datetime"].dt.date.astype(str)

@@ -128,7 +128,7 @@ DEBIT_KEYWORDS = re.compile(
 # Credit signal words
 CREDIT_KEYWORDS = re.compile(
     r"\b(credit(?:ed)?|received|deposited|refund(?:ed)?|cashback"
-    r"|reversed|added|received)\b",
+    r"|reversed|added)\b",
     re.IGNORECASE,
 )
 
@@ -141,7 +141,7 @@ FINANCIAL_KEYWORDS = re.compile(
 
 # Reference / transaction ID — common Indian bank SMS formats
 REF_PATTERN = re.compile(
-    r"(?:Ref(?:\s*No)?|RefNo|Txn\s*(?:ID|No\.?)|Transaction\s*ID|UPI\s*Ref"
+    r"(?:Ref(?:\s*No)?|RefNo|Txn\s*(?:ID|No\.?)|Transaction\s*(?:ID|Number)|UPI\s*Ref"
     r"|TxnNo|UTR|IMPS\s*Ref)[:\s-]*([A-Za-z0-9]{6,20})",
     re.IGNORECASE,
 )
@@ -157,8 +157,8 @@ RECIPIENT_DEBIT_PATTERNS = [
 
 RECIPIENT_CREDIT_PATTERNS = [
     re.compile(
-        r"(?:from|received\s+from|credited\s+(?:from|by)|by\s+a/c\s+linked\s+to)\s+"
-        r"([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
+        r"(?:transfer(?:red)?\s+from|received\s+from|from|by\s+a/c\s+linked\s+to)\s+"
+        r"(?!\s*(?:Rs\.?|INR|₹))([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
         re.IGNORECASE,
     ),
 ]
@@ -177,9 +177,17 @@ SPAM_SENDER_PATTERN = re.compile(
 SPAM_BODY_PATTERN = re.compile(
     r"(?:recharge|data\s*pack|data\s*loan|validity|playlist|subscription|claim"
     r"|OTT|netflix|jiohotstar|zee5|apple\s*music|free\s*access|call\s*alert"
-    r"|hello\s*tune|missed\s*call|offer\s*expires|cashback\s*offer|discount\s*code)",
+    r"|hello\s*tune|missed\s*call|offer\s*expires|cashback\s*offer|discount\s*code"
+    r"|amazon\.in|flat\s*₹|chance\s*to\s*win|assured|free\s*delivery|win\s*₹)",
     re.IGNORECASE,
 )
+
+# Failed transaction indicators
+FAILURE_GATE = re.compile(
+    r"\b(fail(?:ed)?|decline(?:d)?|unsuccessful|reversed|rejected|cancelled)\b",
+    re.IGNORECASE,
+)
+
 
 
 # -------------------------------------------------------
@@ -332,23 +340,48 @@ def _extract_ref_id(body: str) -> Optional[str]:
 
 
 def _extract_recipient(body: str, direction: Optional[str]) -> Optional[str]:
-    """Extract recipient name based on detected direction."""
-    patterns = (
-        RECIPIENT_DEBIT_PATTERNS
-        if direction == "DEBIT"
-        else RECIPIENT_CREDIT_PATTERNS
-        if direction == "CREDIT"
-        else RECIPIENT_DEBIT_PATTERNS + RECIPIENT_CREDIT_PATTERNS
-    )
+    if not direction:
+        return None
 
-    for pat in patterns:
-        m = pat.search(body)
-        if m:
-            name = m.group(1).strip()
-            # Trim at terminators (Ref, on, via …)
-            name = RECIPIENT_TERMINATORS.split(name)[0].strip()
-            if len(name) >= 2:
-                return name
+    patterns = RECIPIENT_DEBIT_PATTERNS if direction == "DEBIT" else RECIPIENT_CREDIT_PATTERNS
+    for p in patterns:
+        match = p.search(body)
+        if match:
+            # Group 1 is the name
+            name = match.group(1).strip()
+            
+            # Apply terminators to cut off trailing garbage
+            term_match = RECIPIENT_TERMINATORS.search(name)
+            if term_match:
+                name = name[:term_match.start()].strip()
+
+            # Clean trailing punctuation
+            name = re.sub(r"[-_.,]+$", "", name).strip()
+            return name if name else None
+
+    return None
+
+def _fallback_merchant_extraction(body: str, sender: str, bank: Optional[str]) -> Optional[str]:
+    # 1. Look for known merchants in body
+    known_merchants = re.compile(
+        r"\b(Rapido|Uber|Ola|Swiggy|Zomato|Amazon|Flipkart|Myntra|Airtel|Jio|Vi|Blinkit|Zepto)\b", 
+        re.IGNORECASE
+    )
+    match = known_merchants.search(body)
+    if match:
+        return match.group(1).title()
+    
+    # 2. Use sender if it's not a generic bank sender
+    if sender and sender.strip() and sender.lower() != "partner":
+        # Clean sender like "AD-SBIUPI-S" -> "SBIUPI"
+        clean_sender = re.sub(r"^[A-Z]{2}-|-?[A-Z]$", "", sender).strip()
+        # If the clean sender is just the bank (like SBIUPI), don't use it as merchant
+        if bank and clean_sender.upper().startswith(bank.upper()):
+            return None
+        if "UPI" in clean_sender.upper():
+            return None
+        return clean_sender
+
     return None
 
 
@@ -392,13 +425,23 @@ def parse_sms_body(body: Optional[str], sender: Optional[str] = None) -> ParsedT
         logger.debug("Skipping spam/promotional message from sender=%s", sender)
         return result
 
+    # Gate 3 — reject failed transactions
+    if FAILURE_GATE.search(body):
+        logger.info("Skipping failed/declined transaction message: %s", body[:50])
+        return result
+
     result.is_financial = True
 
     # --- Amount ---
     result.amount = _extract_first_amount(body)
 
     # --- Direction ---
-    if DEBIT_KEYWORDS.search(body):
+    body_lower = body.lower()
+    if "credited" in body_lower:
+        result.direction = "CREDIT"
+    elif "debited" in body_lower:
+        result.direction = "DEBIT"
+    elif DEBIT_KEYWORDS.search(body):
         result.direction = "DEBIT"
     elif CREDIT_KEYWORDS.search(body):
         result.direction = "CREDIT"
@@ -427,6 +470,8 @@ def parse_sms_body(body: Optional[str], sender: Optional[str] = None) -> ParsedT
 
     # --- Recipient ---
     result.recipient_name = _extract_recipient(body, result.direction)
+    if not result.recipient_name:
+        result.recipient_name = _fallback_merchant_extraction(body, sender, result.bank)
 
     logger.info(
         "Parsed SMS | financial=%s | amt=%.2f | dir=%s | bank=%s | mode=%s | ref=%s",
