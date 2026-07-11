@@ -18,8 +18,8 @@ the pattern this repo actually follows.
   reusable logic (regex rules, cleaning helpers) into a plain `.py` module (e.g.
   `merchant_normalizer.py`) once it's used from more than one notebook or needs test coverage.
 - **`ml_service`**: Pydantic models in `app/schemas/`, routes thin (`app/routes/`), business logic in
-  `app/service.py` / dedicated processor modules (`sms_parser.py`, `financial_sms_processor.py`,
-  `excel_loader.py`).
+  `app/services/` (`persistence.py`, `sms_pipeline.py`), parsing/extraction in `app/parsers/`
+  (`sms_parser.py`, `excel_loader.py`), external clients in `app/clients/` (`supabase_client.py`).
 - {{TODO: add linting/formatting tooling here once adopted (e.g. ruff/black, notebook output
   stripping via nbstripout) — none is currently enforced.}}
 

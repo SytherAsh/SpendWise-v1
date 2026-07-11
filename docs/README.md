@@ -19,15 +19,15 @@ the current task focus and links here for depth.
 
 These describe the **SMS ingestion pipeline** specifically — accurate and still authoritative for
 that surface, but not for the new PDF/Excel statement-upload pipeline (see `CLAUDE.md`'s "Current
-task focus"):
+task focus"). As of 2026-07-11 this tier was consolidated from five docs down to two: the other three
+(`ml_service_pipeline_summary.md`, `sms_to_true_financial.md`, `code-audit-and-data-quality-report.md`,
+`walkthrough.md`) had drifted from the actual code — one described a downstream pipeline stage that
+was never built — and were folded into `sms_pipeline.md`, which was re-verified against the code.
 
 | Document | Contents |
 | --- | --- |
-| [ml_service_pipeline_summary.md](ml_service_pipeline_summary.md) | Module-by-module architecture reference for the current `ml_service` (FastAPI) SMS pipeline |
-| [sms_to_true_financial.md](sms_to_true_financial.md) | Function/line-level reference for the SMS → `true_financial_sms.csv` flow |
-| [code-audit-and-data-quality-report.md](code-audit-and-data-quality-report.md) | Audit of the SMS ingestion/parsing pipeline, bugs found, and the labeling/confidence refactor |
-| [transaction-analysis-report.md](transaction-analysis-report.md) | Statistical/data-quality report on the transaction dataset |
-| [walkthrough.md](walkthrough.md) | Full system walkthrough (Android → FastAPI → CSV/Supabase) |
+| [sms_pipeline.md](sms_pipeline.md) | Module-by-module architecture reference for the `ml_service` (FastAPI) SMS pipeline: flow, parser/processor/persistence internals, data artifacts, known gaps |
+| [transaction-analysis-report.md](transaction-analysis-report.md) | Statistical/data-quality report on the transaction dataset (bank workbook + SMS financial file) |
 
 ## Rule
 

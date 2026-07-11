@@ -39,7 +39,7 @@ The active work is an **ML pipeline for bank-statement ingestion**:
   an existing rule-based keyword categorizer. It's unrelated to the current
   task's deliverable (merchant extraction, not category assignment).
 - **SMS ingestion pipeline** (Android app → `ml_service` →
-  `sms_parser.py` / `financial_sms_processor.py`) — a separate, **still
+  `sms_parser.py` / `sms_pipeline.py`) — a separate, **still
   live** pipeline that parses SMS/notification text captured from the
   user's phone into transactions. It solves a different problem (SMS text
   → transaction) from the current task (PDF/Excel statement → clean CSV).
@@ -56,7 +56,7 @@ The active work is an **ML pipeline for bank-statement ingestion**:
   Excel-statement parsing — mine it for reusable regex/cleaning logic
   (e.g. `clean_recipient`, `determine_dr_cr`, `validate_dataframe`) rather
   than rewriting from scratch.
-- `ml_service/app/excel_loader.py`, `ml_service/app/routes/bulk.py` —
+- `ml_service/app/parsers/excel_loader.py`, `ml_service/app/routes/bulk.py` —
   existing Excel ingestion into Supabase (`/load-excel` endpoint).
 - `ml_service/app/schemas/transaction.py` — Pydantic models for
   transaction shapes already in use (`TransactionCreate`,
@@ -67,18 +67,14 @@ The active work is an **ML pipeline for bank-statement ingestion**:
 ## Doc map (`docs/`)
 
 Current and accurate:
-- `docs/ml_service_pipeline_summary.md` — most authoritative, up-to-date
-  architecture reference for the current `ml_service` (FastAPI) SMS
-  pipeline, module by module.
-- `docs/sms_to_true_financial.md` — function/line-level reference for the
-  SMS → `true_financial_sms.csv` pipeline.
-- `docs/code-audit-and-data-quality-report.md` — audit of the current SMS
-  ingestion/parsing pipeline, bugs found, and the refactor that added
-  labels/confidence scoring.
+- `docs/sms_pipeline.md` — authoritative architecture reference for the current
+  `ml_service` (FastAPI) SMS pipeline: flow, module-by-module (parser,
+  batch processor, ingest routes, Supabase persistence), data artifacts,
+  and known gaps. Consolidated from four earlier docs on 2026-07-11 after
+  they were found to have drifted from the code (one described a
+  downstream pipeline stage that was never built).
 - `docs/transaction-analysis-report.md` — statistical/data-quality report
   on the transaction dataset (bank workbook + SMS financial file).
-- `docs/walkthrough.md` — full system walkthrough (Android → FastAPI →
-  CSV/Supabase); Spring Boot references removed to match current scope.
 
 These describe the **SMS pipeline**, not the new PDF/Excel-statement
 pipeline — useful for patterns (parsing, dedup, confidence scoring) but not
@@ -130,11 +126,11 @@ and are also indexed in `docs/README.md`.
 
 | Module | Path | Responsibility |
 | --- | --- | --- |
-| SMS ingestion & classification | `ml_service/app/sms_parser.py`, `financial_sms_processor.py` | Parse/classify raw SMS text into structured transactions |
-| Excel bulk ingestion | `ml_service/app/excel_loader.py`, `app/routes/bulk.py` | Load a cleaned workbook into Supabase |
+| SMS ingestion & classification | `ml_service/app/parsers/sms_parser.py`, `app/services/sms_pipeline.py` | Parse/classify raw SMS text into structured transactions |
+| Excel bulk ingestion | `ml_service/app/parsers/excel_loader.py`, `app/routes/bulk.py` | Load a cleaned workbook into Supabase |
 | Categorization (separate concern) | `ml_service/app/routes/categorize.py` | Rule-based keyword categorizer — unrelated to merchant extraction |
-| Transaction API | `ml_service/app/routes/transaction.py`, `app/service.py` | CRUD + logic endpoints over persisted transactions |
-| Persistence | `ml_service/app/supabase_client.py`, `app/schemas/transaction.py` | Supabase client + Pydantic shapes |
+| Transaction API | `ml_service/app/routes/transaction.py`, `app/services/persistence.py` | CRUD + logic endpoints over persisted transactions |
+| Persistence | `ml_service/app/clients/supabase_client.py`, `app/schemas/transaction.py` | Supabase client + Pydantic shapes |
 | Offline Excel ETL (prior art) | `ml_preprocessing/CSV_PARSER.ipynb`, `Segregation.ipynb` | Decrypt + parse raw bank Excel exports into a clean workbook |
 | Merchant normalization | `ml_preprocessing/MerchantNormalization.ipynb`, `merchant_normalizer.py` | Canonicalize recipient/merchant names |
 | Bank-statement pipeline (new) | {{TODO: fill in once built}} | PDF/Excel statement → clean CSV + merchant name |

@@ -8,6 +8,11 @@ FastAPI service. Base: run locally with `uvicorn app.main:app --reload --host 0.
 | GET | `/` | Health check | `app/main.py` |
 | POST | `/api/data` | Single SMS/notification ingestion (from Android) | `app/routes/ingest.py` |
 | POST | `/api/data/bulk` | Bulk SMS ingestion (from Android) | `app/routes/ingest.py` |
+| GET | `/api/data` | List raw SMS rows from Supabase `raw_sms` (filters: `financial_only`, `device_id`) | `app/routes/ingest.py` |
+| GET | `/api/data/{record_id}` | Fetch a single raw SMS row | `app/routes/ingest.py` |
+| GET | `/api/data/stats/summary` | Total/financial/non-financial counts + recent financial rows | `app/routes/ingest.py` |
+| POST | `/api/data/{record_id}/reparse` | Re-run the current parser against a stored raw row, update in place | `app/routes/ingest.py` |
+| GET | `/api/data/last-sync` | Last-synced `timestamp_ms` for a `device_id`, for incremental sync | `app/routes/ingest.py` |
 | POST | `/transactions` | Create transaction manually | `app/routes/transaction.py` |
 | GET | `/transactions?limit=50&offset=0` | List raw transactions | `app/routes/transaction.py` |
 | GET | `/transactions/{transaction_id}` | Get a raw transaction | `app/routes/transaction.py` |

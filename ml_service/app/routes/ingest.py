@@ -2,8 +2,12 @@
 ingest.py — FastAPI routes for SMS/notification ingestion.
 
 Flow per message:
-  1. Parse body with parse_sms_body()
-  2. Save to local CSV  (always — existing behaviour preserved)
+  1. Parse body with parse_sms_body() (used for the API response + Supabase only)
+  2. Save the raw fields to local CSV (always — existing behaviour preserved).
+     The CSV stores only what the phone actually sent (id/sender/body/timestamps/
+     device_id) — no parser output. Classification/extraction is always re-derived
+     downstream from `body` by app/services/sms_pipeline.py, so the raw file stays
+     valid across parser changes.
   3. If financial → attempt Supabase persist via persist_sms_transaction()
      - On Supabase failure: log & continue; CSV is NOT affected
 """
@@ -22,9 +26,9 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.schemas.transaction import SmsPayload, ParsedTransaction
-from app.sms_parser import parse_sms_body, normalize_timestamp
-from app.supabase_client import supabase
-from app.service import persist_sms_transaction, safe_value
+from app.parsers.sms_parser import parse_sms_body, normalize_timestamp
+from app.clients.supabase_client import supabase
+from app.services.persistence import persist_sms_transaction, safe_value
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -39,6 +43,10 @@ CSV_FILE = "data/captured_sms.csv"
 
 # Sync checkpoint: tracks last timestamp_ms per device_id
 SYNC_STATE_FILE = "data/sync_state.json"
+
+# Raw CSV schema — capture only, no parser output. Keep this list stable;
+# changing it after captured_sms.csv already exists will misalign the header.
+RAW_CSV_FIELDS = ["id", "sender", "body", "timestamp_ms", "timestamp_human", "device_id"]
 
 
 # -------------------------------------------------------
@@ -81,11 +89,33 @@ class RawSmsOut(BaseModel):
 # CSV helpers
 # -------------------------------------------------------
 
+def _warn_if_header_mismatch() -> None:
+    """Log a loud warning if an existing captured_sms.csv has a stale header.
+
+    Doesn't block the write (CSV capture must never fail a phone sync) — just
+    surfaces the drift so it can't silently misalign columns unnoticed.
+    """
+    if not os.path.isfile(CSV_FILE):
+        return
+    try:
+        with open(CSV_FILE, mode="r", newline="", encoding="utf-8") as f:
+            header = next(csv.reader(f), None)
+        if header is not None and header != RAW_CSV_FIELDS:
+            logger.warning(
+                "captured_sms.csv header %s does not match the current raw schema %s — "
+                "archive or reset the file before continuing, or rows will misalign.",
+                header, RAW_CSV_FIELDS,
+            )
+    except (OSError, StopIteration):
+        pass
+
+
 def save_to_csv(data_dict: dict) -> None:
     """Append a single record to the local CSV file."""
+    _warn_if_header_mismatch()
     file_exists = os.path.isfile(CSV_FILE)
     with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=data_dict.keys())
+        writer = csv.DictWriter(f, fieldnames=RAW_CSV_FIELDS)
         if not file_exists:
             writer.writeheader()
         writer.writerow(data_dict)
@@ -95,16 +125,22 @@ def batch_save_to_csv(records: list[dict]) -> None:
     """Append a list of records to the local CSV file in one pass."""
     if not records:
         return
+    _warn_if_header_mismatch()
     file_exists = os.path.isfile(CSV_FILE)
     with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=records[0].keys())
+        writer = csv.DictWriter(f, fieldnames=RAW_CSV_FIELDS)
         if not file_exists:
             writer.writeheader()
         writer.writerows(records)
 
 
-def _build_csv_record(payload: SmsPayload, parsed: ParsedTransaction) -> dict:
-    """Build a flat dict suitable for CSV storage."""
+def _build_csv_record(payload: SmsPayload) -> dict:
+    """Build a flat dict of pure raw capture fields — no parser output.
+
+    Classification/extraction always happens downstream by re-parsing `body`
+    (see app/services/sms_pipeline.py), so the raw file stays valid across
+    parser changes and never needs to be re-captured from the phone.
+    """
     return {
         "id":              payload.id,
         "sender":          payload.sender,
@@ -112,12 +148,6 @@ def _build_csv_record(payload: SmsPayload, parsed: ParsedTransaction) -> dict:
         "timestamp_ms":    payload.timestamp_ms,
         "timestamp_human": payload.timestamp_human,
         "device_id":       payload.device_id,
-        "is_financial":    parsed.is_financial,
-        "amount":          parsed.amount,
-        "direction":       parsed.direction,
-        "bank":            parsed.bank,
-        "upi_id":          parsed.upi_id,
-        "recipient":       parsed.recipient_name,
     }
 
 
@@ -166,7 +196,7 @@ async def ingest_single(payload: SmsPayload):
         parsed = parse_sms_body(payload.body, sender=payload.sender)
 
         # 1. CSV (always)
-        record = _build_csv_record(payload, parsed)
+        record = _build_csv_record(payload)
         save_to_csv(record)
         logger.info("✅ Saved to CSV: id=%s sender=%s", payload.id, payload.sender)
 
@@ -225,7 +255,7 @@ async def ingest_bulk(payloads: List[SmsPayload]):
             else:
                 non_financial_count += 1
 
-            csv_records.append(_build_csv_record(payload, parsed))
+            csv_records.append(_build_csv_record(payload))
 
             # Supabase — only for financial, non-fatal
             if parsed.is_financial:

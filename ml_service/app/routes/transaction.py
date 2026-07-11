@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.transaction import TransactionCreate
-from app.service import (
+from app.services.persistence import (
     create_single_transaction,
     get_transaction_by_id,
     list_transactions,

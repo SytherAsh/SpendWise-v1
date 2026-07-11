@@ -1,19 +1,19 @@
 # Architecture
 
 For full module-by-module depth on the live SMS pipeline, see
-[`../ml_service_pipeline_summary.md`](../ml_service_pipeline_summary.md) and
-[`../sms_to_true_financial.md`](../sms_to_true_financial.md) — this file stays at the
-whole-system-in-one-paragraph level and links out rather than duplicating that detail.
+[`../sms_pipeline.md`](../sms_pipeline.md) — this file stays at the whole-system-in-one-paragraph
+level and links out rather than duplicating that detail.
 
 ## System overview
 
 Two ingestion paths currently feed the same eventual store (Supabase), plus one still-manual offline
 path:
 
-1. **SMS/notification path (live)** — Android app → `ml_service` (FastAPI) → `sms_parser.py` /
-   `financial_sms_processor.py` classify and structure each message → Supabase.
-2. **Excel bulk-load path (live)** — a cleaned Excel workbook → `ml_service/app/excel_loader.py` →
-   `POST /load-excel` → Supabase.
+1. **SMS/notification path (live)** — Android app → `ml_service` (FastAPI) →
+   `app/parsers/sms_parser.py` / `app/services/sms_pipeline.py` classify and structure each message →
+   Supabase.
+2. **Excel bulk-load path (live)** — a cleaned Excel workbook → `ml_service/app/parsers/excel_loader.py`
+   → `POST /load-excel` → Supabase.
 3. **Bank-statement path (in progress — current task focus)** — a raw PDF/Excel bank-statement
    export → (new pipeline, see `CLAUDE.md`) → clean structured CSV → intended to feed the same
    Supabase tables as path 2, uploaded by a user via the website (website not yet built).
@@ -27,11 +27,11 @@ reimplement — see `CLAUDE.md`'s "Relevant existing code."
 
 | Module | Path | Responsibility |
 | --- | --- | --- |
-| SMS ingestion & classification | `ml_service/app/sms_parser.py`, `financial_sms_processor.py` | Parse/classify raw SMS text into structured transactions |
-| Excel bulk ingestion | `ml_service/app/excel_loader.py`, `app/routes/bulk.py` | Load a cleaned workbook into Supabase |
+| SMS ingestion & classification | `ml_service/app/parsers/sms_parser.py`, `app/services/sms_pipeline.py` | Parse/classify raw SMS text into structured transactions |
+| Excel bulk ingestion | `ml_service/app/parsers/excel_loader.py`, `app/routes/bulk.py` | Load a cleaned workbook into Supabase |
 | Categorization (separate concern) | `ml_service/app/routes/categorize.py` | Rule-based keyword categorizer — unrelated to merchant extraction |
-| Transaction API | `ml_service/app/routes/transaction.py`, `app/service.py` | CRUD + logic endpoints over persisted transactions |
-| Persistence | `ml_service/app/supabase_client.py`, `app/schemas/transaction.py` | Supabase client + Pydantic shapes (`TransactionCreate`, `SupabaseTransaction`, `ParsedTransaction`) |
+| Transaction API | `ml_service/app/routes/transaction.py`, `app/services/persistence.py` | CRUD + logic endpoints over persisted transactions |
+| Persistence | `ml_service/app/clients/supabase_client.py`, `app/schemas/transaction.py` | Supabase client + Pydantic shapes (`TransactionCreate`, `SupabaseTransaction`, `ParsedTransaction`) |
 | Offline Excel ETL (prior art) | `ml_preprocessing/CSV_PARSER.ipynb`, `Segregation.ipynb` | Decrypt + parse raw bank Excel exports into a clean workbook |
 | Merchant normalization | `ml_preprocessing/MerchantNormalization.ipynb`, `merchant_normalizer.py` | Canonicalize recipient/merchant names via UPI-ID grouping, fuzzy clustering, and a manual-review pass (`find_prefix_variants` + a curated alias dict) for the residual truncation-prefix cases neither tier can safely resolve alone |
 | Bank-statement pipeline (new) | {{TODO: fill in once the module/route exists}} | PDF/Excel statement → clean CSV + merchant name, per-user upload |

@@ -190,6 +190,36 @@ SPAM_BODY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Raw phone-number sender (e.g. "+916354614184") — legitimate banks/services always
+# use alphanumeric sender IDs (SBIUPI, HDFCBK) or short codes (56321), never a raw
+# 10+-digit mobile number. A phone-number sender is a strong scam signal.
+PHONE_SENDER_PATTERN = re.compile(r"^\+?\d{10,}$")
+
+# URL shorteners — legit transaction-confirmation SMS never carry links. Common in
+# betting/loan/phishing spam ("...Withdraw now h0a.us/xyz").
+URL_SHORTENER_PATTERN = re.compile(
+    r"(?:h0a\.us|p-y\.tm|2lm\.in|ha2\.online|bit\.ly|tinyurl|t\.co/|goo\.gl"
+    r"|\b[a-z0-9-]+\.(?:us|online|xyz|link|club|site|top)/)",
+    re.IGNORECASE,
+)
+
+# Betting / gambling / fake-winnings spam that mimics transaction wording
+# ("Transaction successfully done of Rs.98,650 to your Rummy A/C. Withdraw it now").
+GAMBLING_PATTERN = re.compile(
+    r"\b(?:rummy|teen\s*patti|casino|betting|bet\s*now|bonus\s*a/?c"
+    r"|withdraw\s*(?:it|now)|winning\s*amount|lottery|jackpot|rummy\s*bank)\b",
+    re.IGNORECASE,
+)
+
+# Collect / request-money — a request to pay, not a completed transaction. The amount
+# is conditional ("On approving, Rs.345 will be debited" / "has requested Rs500 frm u.
+# Once approved..."), so it must never be counted as a real transaction.
+COLLECT_REQUEST_PATTERN = re.compile(
+    r"(?:has\s+requested|requested\s+(?:money|rs\.?|inr|₹)|requested\s+money\s+(?:from|on)"
+    r"|collect\s+request|(?:on|once)\s+approv(?:ing|ed)|will\s+be\s+debited\s+from\s+your)",
+    re.IGNORECASE,
+)
+
 # Failed transaction indicators
 FAILURE_GATE = re.compile(
     r"\b(fail(?:ed)?|decline(?:d)?|unsuccessful|reversed|rejected|cancelled)\b",
@@ -243,7 +273,7 @@ BALANCE_WORD_PATTERN = re.compile(
 )
 
 MERCHANT_NOISE_PATTERN = re.compile(
-    r"\b(?:LTD|LIMITED|PVT|PRIVATE|SERVICES|SERVICE|CITY|MUMBAI|DELHI|PUNE|BANGALORE|BENGALURU|HYDERABAD|CHENNAI|KOLKATA|NOIDA|GURGAON|CORP|CORPORATION|ENTERPRISES|INDIA\s*PVT)\b",
+    r"\b(?:LTD|LIMITED|PVT|PRIVATE|SERVICES|SERVICE|CITY|MUMBAI|DELHI|PUNE|BANGALORE|BENGALURU|HYDERABAD|CHENNAI|KOLKATA|NOIDA|GURGAON|CORP|CORPORATION|ENTERPRISES|INDIA)\b",
     re.IGNORECASE,
 )
 
@@ -330,13 +360,30 @@ def _clean_entity_name(name: Optional[str]) -> Optional[str]:
 
 
 def _extract_transaction_amount(body: str, direction: Optional[str]) -> Optional[float]:
-    """Extract the transaction amount with a small amount of contextual scoring."""
-    candidates = []
+    """Extract the transaction amount with a small amount of contextual scoring.
+
+    The balance figure ("Avl Bal Rs 642.92") is the classic trap — in some SBI
+    formats it sits far enough from the transaction amount that both share the
+    same context window, and a naive scorer picks the (usually larger) balance.
+    We resolve that directly: BALANCE_PATTERN already pinpoints the balance number,
+    so any amount candidate occupying that exact span is excluded outright.
+    """
     text = body or ""
+
+    # Spans of the balance number(s) — candidates overlapping these are the balance.
+    balance_spans = [m.span(1) for m in BALANCE_PATTERN.finditer(text)]
+
+    def _overlaps_balance(span: tuple[int, int]) -> bool:
+        return any(not (span[1] <= bs[0] or span[0] >= bs[1]) for bs in balance_spans)
+
+    candidates = []
     for match in AMOUNT_PATTERN.finditer(text):
-        raw = match.group(1) or match.group(2)
+        grp = 1 if match.group(1) else 2
+        raw = match.group(grp)
         if not raw:
             continue
+        if _overlaps_balance(match.span(grp)):
+            continue  # this number is the available balance, not the transaction amount
         context_start = max(0, match.start() - 70)
         context_end = min(len(text), match.end() + 70)
         context = text[context_start:context_end]
@@ -356,12 +403,14 @@ def _extract_transaction_amount(body: str, direction: Optional[str]) -> Optional
             amount = _parse_amount(raw)
         except ValueError:
             continue
-        candidates.append((score, amount))
+        # position is a stable tie-breaker: the transaction amount precedes the
+        # balance in Indian bank SMS, so prefer the earlier match on a score tie.
+        candidates.append((score, -match.start(), amount))
 
     if not candidates:
         return None
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return candidates[0][1]
+    return candidates[0][2]
 
 
 def _score_financial_confidence(body: str, parsed_amount: Optional[float], direction: Optional[str]) -> float:
@@ -392,6 +441,20 @@ def _classify_sms(body: Optional[str], sender: Optional[str] = None) -> tuple[st
 
     if OTP_PATTERN.search(text):
         return "OTP", 0.99, "Matched OTP or verification pattern"
+
+    # Scam gate — reject fake-transaction spam before it can reach the financial path.
+    # These mimic transaction wording (amount + "credited"/"done") but carry huge fake
+    # sums that would pollute analytics; catch them by sender/link/gambling signals.
+    if PHONE_SENDER_PATTERN.match(sender_text.strip()):
+        return "PROMOTIONAL", 0.97, "Raw phone-number sender (scam/spam, never a real bank)"
+    if URL_SHORTENER_PATTERN.search(text):
+        return "PROMOTIONAL", 0.96, "Contains a URL shortener (spam/phishing, not a bank SMS)"
+    if GAMBLING_PATTERN.search(text):
+        return "PROMOTIONAL", 0.96, "Betting/gambling spam mimicking a transaction"
+
+    # Collect / request-money — a request to pay, not a completed transaction.
+    if COLLECT_REQUEST_PATTERN.search(text):
+        return "UNKNOWN", 0.20, "Collect/request-money (conditional, not a completed transaction)"
 
     # If promotional cues are strong (cashback, win, use code, offer)
     # prefer PROMOTIONAL even when an amount appears — these are marketing

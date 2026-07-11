@@ -21,14 +21,16 @@ from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 
-from app.supabase_client import supabase
+from app.clients.supabase_client import supabase
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+# Unused elsewhere in this module today; kept for whatever wires it up next.
+# Not fatal — a missing .env must not block raw SMS capture from starting.
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")
 if ACCOUNT_ID is None:
-    raise ValueError("ACCOUNT_ID not found in .env")
+    logger.warning("ACCOUNT_ID not found in .env — Supabase-backed account lookups may be affected.")
 
 
 # -------------------------------------------------------
@@ -184,7 +186,7 @@ def transaction_exists(
     2. Else match on (account_id + amount + dr_cr_indicator + approximate date window)
        using the date portion of transaction_date (YYYY-MM-DD).
 
-    The 2-minute bucket dedup is handled upstream in FinancialSmsProcessor;
+    The 2-minute bucket dedup is handled upstream in app/sms_pipeline.py;
     here we do a DB-level check to prevent cross-session duplicates.
     """
     if not account_id or amount is None:

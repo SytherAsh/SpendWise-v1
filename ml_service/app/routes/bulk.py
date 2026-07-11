@@ -2,8 +2,8 @@
 from fastapi import APIRouter
 
 
-from app.excel_loader import load_transactions_from_excel
-from app.service import create_single_transaction
+from app.parsers.excel_loader import load_transactions_from_excel
+from app.services.persistence import create_single_transaction
 
 
 router = APIRouter()

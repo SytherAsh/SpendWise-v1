@@ -7,9 +7,9 @@
   `POST /api/data/bulk`).
 - Classify each message (`FINANCIAL_TRANSACTION`, `FAILED_TRANSACTION`, `OTP`, `PROMOTIONAL`,
   `BANKING_ALERT`, `BILL_REMINDER`, `UNKNOWN`) with a confidence score, per
-  `ml_service/app/sms_parser.py`.
+  `ml_service/app/parsers/sms_parser.py`.
 - Route low-confidence/unrecognized messages to an unknown-message review queue
-  (`data/unknown_sms.csv`) rather than silently dropping them.
+  (`data/review_queue_sms.csv`) rather than silently dropping them.
 - Bulk-load a cleaned Excel workbook into Supabase (`POST /load-excel`).
 
 ### Current focus (bank-statement ingestion — in progress, see `CLAUDE.md`)

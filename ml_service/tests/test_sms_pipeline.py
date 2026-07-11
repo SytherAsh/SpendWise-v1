@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.financial_sms_processor import FinancialSmsProcessor
-from app.sms_parser import parse_sms_body
+from app.services.sms_pipeline import SmsPipeline
+from app.parsers.sms_parser import parse_sms_body
 
 
 def test_financial_transaction_parsing_extracts_core_fields():
@@ -77,12 +77,15 @@ def test_recipient_is_cleaned_for_merchant_style_sms():
     assert parsed.recipient_name == "Rapido"
 
 
-def test_processor_creates_clean_financial_and_unknown_outputs(tmp_path: Path):
+def test_pipeline_creates_clean_financial_and_review_outputs(tmp_path: Path):
     input_file = tmp_path / "captured_sms.csv"
     clean_file = tmp_path / "clean_sms_eda.csv"
     financial_file = tmp_path / "true_financial_sms.csv"
-    unknown_file = tmp_path / "unknown_sms.csv"
+    review_file = tmp_path / "review_queue_sms.csv"
 
+    # Raw capture schema only — the pipeline re-derives everything from the body.
+    # Two identical debit SMS a few seconds apart (an SMS + its notification twin)
+    # plus one non-financial message.
     rows = [
         {
             "id": "1",
@@ -91,65 +94,48 @@ def test_processor_creates_clean_financial_and_unknown_outputs(tmp_path: Path):
             "timestamp_ms": "1767283633363",
             "timestamp_human": "2026-01-01 21:37:13",
             "device_id": "device-1",
-            "is_financial": True,
-            "amount": 120.0,
-            "direction": "DEBIT",
-            "bank": "SBI",
-            "upi_id": "",
-            "recipient": "PRADHAN MANTRI B",
-        },
-        {
-            "id": "1",
-            "sender": "JD-SBIUPI-S",
-            "body": "Dear UPI user A/C X7686 debited by 120 on date 01Jan26 trf to PRADHAN MANTRI B Refno 600132505284",
-            "timestamp_ms": "1767283633363",
-            "timestamp_human": "2026-01-01 21:37:13",
-            "device_id": "device-1",
-            "is_financial": True,
-            "amount": 120.0,
-            "direction": "DEBIT",
-            "bank": "SBI",
-            "upi_id": "",
-            "recipient": "PRADHAN MANTRI B",
         },
         {
             "id": "2",
+            "sender": "AX-SBIUPI-S",
+            "body": "Dear UPI user A/C X7686 debited by 120 on date 01Jan26 trf to PRADHAN MANTRI B Refno 600132505284",
+            "timestamp_ms": "1767283640000",
+            "timestamp_human": "2026-01-01 21:37:20",
+            "device_id": "device-1",
+        },
+        {
+            "id": "3",
             "sender": "RANDOM-SENDER",
             "body": "Reference update Rs. 42 processed.",
             "timestamp_ms": "1767283633364",
             "timestamp_human": "2026-01-01 21:37:14",
             "device_id": "device-1",
-            "is_financial": False,
-            "amount": None,
-            "direction": None,
-            "bank": None,
-            "upi_id": None,
-            "recipient": None,
         },
     ]
-
     pd.DataFrame(rows).to_csv(input_file, index=False)
 
-    processor = FinancialSmsProcessor(
+    pipeline = SmsPipeline(
         input_file=str(input_file),
-        output_file=str(clean_file),
-        financial_output_file=str(financial_file),
-        unknown_output_file=str(unknown_file),
+        clean_output=str(clean_file),
+        financial_output=str(financial_file),
+        review_output=str(review_file),
     )
+    summary = pipeline.run(write=True)
 
-    summary = processor.process_all(push_to_supabase=False)
-
-    assert summary is not None
-    assert summary["total_records"] == 2
-    assert summary["financial_count"] == 1
-    assert clean_file.exists()
-    assert financial_file.exists()
-    assert unknown_file.exists()
+    assert summary["total_clean_rows"] == 3
+    assert clean_file.exists() and financial_file.exists() and review_file.exists()
 
     financial_df = pd.read_csv(financial_file)
-    unknown_df = pd.read_csv(unknown_file)
+    review_df = pd.read_csv(review_file)
 
+    # The two identical debits collapse to one financial transaction (cross-channel dedup).
     assert len(financial_df) == 1
-    assert financial_df.iloc[0]["classification_label"] == "FINANCIAL_TRANSACTION"
-    assert len(unknown_df) >= 1
-    assert set(unknown_df.columns) == set(["body", "sender", "predicted_label", "confidence", "review_status", "true_label"])
+    assert financial_df.iloc[0]["amount"] == 120.0
+    assert financial_df.iloc[0]["direction"] == "DEBIT"
+
+    # The non-financial message lands in the review queue with the expected schema.
+    assert len(review_df) >= 1
+    assert set(review_df.columns) == {
+        "event_time", "sender", "body", "predicted_label",
+        "classification_confidence", "review_status", "true_label",
+    }

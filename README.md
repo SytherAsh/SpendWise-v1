@@ -13,6 +13,9 @@ Build a personal finance platform that cleans bank-statement data, stores it in 
 - `GET /` - Health check
 - `POST /api/data` - Single SMS/Notification ingestion (from Android)
 - `POST /api/data/bulk` - Bulk SMS ingestion (from Android)
+- `GET /api/data` - List raw SMS rows (Supabase `raw_sms`)
+- `GET /api/data/stats/summary` - Ingestion stats summary
+- `GET /api/data/last-sync` - Last-synced timestamp per device
 - `POST /transactions` - Create transaction manually
 - `GET /transactions?limit=50&offset=0` - List raw transactions
 - `GET /transactions/{transaction_id}` - Get raw transaction
@@ -83,4 +86,4 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 *(Running on `0.0.0.0` allows the Android app on the same network to connect to it).*
 
-For a comprehensive guide on how the whole system connects, see `walkthrough.md`. For the current ML task scope, see `CLAUDE.md`.
+For a comprehensive guide on how the whole system connects, see `docs/sms_pipeline.md`. For the current ML task scope, see `CLAUDE.md`.
