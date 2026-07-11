@@ -21,9 +21,6 @@ SpendWise uses a layered pipeline to go from raw phone SMS/notifications all the
       │
       ▼
 [ Supabase PostgreSQL ]   ←── Excel bulk-load via /load-excel (historical)
-      │
-      ▼
-[ Spring Boot REST API ]  — serves structured transaction data
 ```
 
 ### Component Roles
@@ -35,7 +32,6 @@ SpendWise uses a layered pipeline to go from raw phone SMS/notifications all the
 | **`sms_parser.py`** | Real-time per-message parser. Extracts Amount, Direction, Bank, UPI ID, Mode, Account Suffix, Balance, Recipient from a single SMS body. |
 | **`FinancialSmsProcessor`** | Offline batch processor. Runs on the full `captured_sms.csv` to deduplicate, filter to 2026, apply cross-platform deduplication (2-minute window), and produce clean EDA files. |
 | **Supabase (PostgreSQL)** | Cloud DB. Stores structured `accounts`, `recipients`, `transactions` tables. Currently used mainly for Excel bulk-load and the transaction/bulk routes. |
-| **Spring Boot** | Exposes clean REST endpoints over the Supabase data for any future dashboard or client. |
 
 ---
 
@@ -43,10 +39,6 @@ SpendWise uses a layered pipeline to go from raw phone SMS/notifications all the
 
 ```
 SpendWise/
-├── backend/                        # Spring Boot Java REST API
-│   ├── src/
-│   └── pom.xml
-│
 ├── ml_preprocessing/               # Offline EDA notebooks
 │   ├── EDA.ipynb                   # Exploratory data analysis
 │   ├── Raw_SmS.ipynb               # Raw SMS inspection
@@ -89,7 +81,7 @@ SpendWise/
 
 ## 3. Setting Up the Database (Supabase)
 
-> **Note:** The live SMS ingestion pipeline writes to local CSVs and does **not** currently require Supabase. Supabase is needed only for the Excel bulk-load route and the Spring Boot API.
+> **Note:** The live SMS ingestion pipeline writes to local CSVs and does **not** currently require Supabase. Supabase is needed only for the Excel bulk-load route.
 
 1. Create a free project on [Supabase](https://supabase.com/).
 2. Go to the **SQL Editor** and run the schema from `README.md` to create `accounts`, `recipients`, and `transactions` tables.
@@ -237,30 +229,7 @@ For loading historical bank statement data (Excel exports) into Supabase:
 
 ---
 
-## 8. Starting the Spring Boot API
-
-This service reads structured transactions from Supabase and exposes REST endpoints.
-
-```bash
-cd Desktop/Journey/SpendWise/backend
-```
-
-Update `src/main/resources/application.properties`:
-```properties
-SPRING_DATASOURCE_URL=jdbc:postgresql://<SUPABASE_DB_HOST>:5432/postgres
-SPRING_DATASOURCE_USERNAME=postgres
-SPRING_DATASOURCE_PASSWORD=your_db_password
-```
-
-```bash
-./mvnw spring-boot:run
-```
-
-Spring Boot API is live at `http://localhost:8080`.
-
----
-
-## 9. Running the Android App
+## 8. Running the Android App
 
 1. Open the **Android Studio** project at `AndroidStudioProjects/SpendWise`.
 2. Connect a physical Android device (recommended) or start an Emulator. Build and run.
@@ -275,7 +244,7 @@ Spring Boot API is live at `http://localhost:8080`.
 
 ---
 
-## 10. The Complete End-to-End Flow
+## 9. The Complete End-to-End Flow
 
 ```
 1. You make a UPI payment (e.g. Google Pay → HDFC Bank)
@@ -304,13 +273,11 @@ Spring Boot API is live at `http://localhost:8080`.
    - Outputs clean_sms_eda.csv + true_financial_sms.csv
 
 7. [Optional] POST /load-excel  → loads historical Excel → Supabase
-
-8. Spring Boot  GET /api/transactions  → returns structured JSON
 ```
 
 ---
 
-## 11. Current Status & Known Limitations
+## 10. Current Status & Known Limitations
 
 | Area | Status |
 |---|---|
@@ -320,6 +287,5 @@ Spring Boot API is live at `http://localhost:8080`.
 | 2026-only filtering | ✅ Active in `FinancialSmsProcessor` |
 | Supabase write on live ingest | ⚠️ Disabled (commented out) — CSV-only mode |
 | Excel bulk-load → Supabase | ✅ Working (first 10 rows; adjust slice for full load) |
-| Spring Boot API | ✅ Available, reads from Supabase |
 | `sms_parser.py` year filter | ℹ️ `is_valid_year()` helper exists; called by processor, not live route |
 | EDA notebooks | ✅ In `ml_preprocessing/` |

@@ -1,10 +1,9 @@
 # SpendWise Backend Services
 
 ## Goal
-Build a personal finance platform that cleans bank-statement data, stores it in Supabase, and exposes transaction + analysis APIs through FastAPI and Spring Boot. The system serves as a central layer to unify UPI transactions from providers like GPay and Paytm, and deliver accurate spending categorization using Regex/ML pipelines.
+Build a personal finance platform that cleans bank-statement data, stores it in Supabase, and exposes transaction + analysis APIs through FastAPI. The system serves as a central layer to unify UPI transactions from providers like GPay and Paytm, and deliver accurate spending data using Regex/ML pipelines. Current focus: an ML pipeline that turns raw PDF/Excel bank-statement uploads into clean, structured CSVs (with merchant/recipient extraction) for website analytics — see `CLAUDE.md` for details.
 
 ## Project Structure
-- **`SpendWise_Backend/`**: Java Spring Boot API (JPA + PostgreSQL). This serves as the primary REST API layer for frontend clients (e.g., a Web Dashboard) to query parsed, structured transaction data.
 - **`ml_service/`**: Python FastAPI service. This handles data ingestion (raw SMS/Notifications from the Android app), runs preprocessing and regex matching to identify transaction details, and stores the structured data in Supabase.
 - **`ml_preprocessing/`**: Jupyter Notebooks used for data cleaning, exploratory data analysis (EDA), and preparing the Regex/ML pipelines.
 
@@ -19,12 +18,6 @@ Build a personal finance platform that cleans bank-statement data, stores it in 
 - `GET /transactions/{transaction_id}` - Get raw transaction
 - `GET /transactions/{transaction_id}/logic` - Analyze transaction logic
 - `POST /load-excel` - Bulk load transactions from CSV/Excel
-
-### Spring Boot (`SpendWise_Backend`) - Client API
-- `POST /api/transactions` - Create processed transaction
-- `GET /api/transactions/{id}` - Get processed transaction
-- `GET /api/transactions?page=0&size=20` - Paginated transaction list
-- `GET /api/transactions/{id}/logic` - View transaction logic
 
 ## Supabase Schema
 Run the following SQL in your Supabase project to initialize the database:
@@ -72,24 +65,12 @@ create index if not exists idx_transactions_created_at on transactions(created_a
 
 ## Environment Setup
 
-### 1. FastAPI (`ml_service/.env`)
+### FastAPI (`ml_service/.env`)
 Create a `.env` file in the `ml_service` directory:
 ```env
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_KEY=your_supabase_anon_key
 ACCOUNT_ID=default_account_uuid
-```
-
-### 2. Spring Boot (`SpendWise_Backend/src/main/resources/application.properties`)
-Update your PostgreSQL credentials:
-```properties
-SPRING_DATASOURCE_URL=jdbc:postgresql://your_supabase_db_url:5432/postgres
-SPRING_DATASOURCE_USERNAME=postgres
-SPRING_DATASOURCE_PASSWORD=your_password
-SERVER_PORT=8080
-FASTAPI_BASE_URL=http://localhost:8000
-FASTAPI_CONNECT_TIMEOUT_MS=5000
-FASTAPI_READ_TIMEOUT_MS=5000
 ```
 
 ## Running Locally
@@ -102,10 +83,4 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 *(Running on `0.0.0.0` allows the Android app on the same network to connect to it).*
 
-### Start the Spring Boot Backend
-```bash
-cd SpendWise_Backend
-./mvnw spring-boot:run
-```
-
-For a comprehensive guide on how the whole system connects, see `walkthrough.md`.
+For a comprehensive guide on how the whole system connects, see `walkthrough.md`. For the current ML task scope, see `CLAUDE.md`.
