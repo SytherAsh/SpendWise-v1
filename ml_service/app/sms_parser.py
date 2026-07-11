@@ -153,11 +153,19 @@ RECIPIENT_DEBIT_PATTERNS = [
         r"([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"(?:withdrawn\s+at)\s+([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:and\s+a/c\s+)([A-Za-z0-9*Xx]+)(?:\s+credited)",
+        re.IGNORECASE,
+    ),
 ]
 
 RECIPIENT_CREDIT_PATTERNS = [
     re.compile(
-        r"(?:transfer(?:red)?\s+from|received\s+from|from|by\s+a/c\s+linked\s+to)\s+"
+        r"(?:transfer(?:red)?\s+from|received\s+from|from|by\s+a/c\s+linked\s+to\s+(?:mobile\s+[0-9Xx]+\s*-?\s*)?|\bby)\s+"
         r"(?!\s*(?:Rs\.?|INR|₹))([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
         re.IGNORECASE,
     ),
@@ -165,7 +173,7 @@ RECIPIENT_CREDIT_PATTERNS = [
 
 # Words that terminate a recipient name
 RECIPIENT_TERMINATORS = re.compile(
-    r"\s+(?:on|ref|via|txn|at|for|Refno|using|through|dated)\b",
+    r"\s+(?:on|ref|via|txn|at|for|Refno|using|through|dated|dt|a/c|ac|account|avl|balance|info|from)\b",
     re.IGNORECASE,
 )
 
@@ -185,6 +193,57 @@ SPAM_BODY_PATTERN = re.compile(
 # Failed transaction indicators
 FAILURE_GATE = re.compile(
     r"\b(fail(?:ed)?|decline(?:d)?|unsuccessful|reversed|rejected|cancelled)\b",
+    re.IGNORECASE,
+)
+
+# Explicit message labels used across the pipeline
+SMS_LABELS = {
+    "FINANCIAL_TRANSACTION",
+    "FAILED_TRANSACTION",
+    "OTP",
+    "PROMOTIONAL",
+    "BANKING_ALERT",
+    "BILL_REMINDER",
+    "UNKNOWN",
+}
+
+OTP_PATTERN = re.compile(
+    r"\b(?:otp|one[-\s]*time\s*password|verification\s*code|auth(?:entication)?\s*code|login\s*code|passcode|secure\s*code)\b",
+    re.IGNORECASE,
+)
+
+PROMOTIONAL_PATTERN = re.compile(
+    r"\b(?:cashback|offer(?:s)?|discount|promo(?:tion)?|loan|credit\s*card|insurance|recharge\s*offer|sale|deal|ad(?:vertisement)?|apply\s*now|buy\s*now|subscribe|install\s*app|win\s*\w*|free\s*delivery|festival\s*offer|shopping\s*offer)\b",
+    re.IGNORECASE,
+)
+
+BANKING_ALERT_PATTERN = re.compile(
+    r"\b(?:kyc\s*reminder|statement\s*available|e[-\s]*statement|password\s*changed|card\s*blocked|card\s*dispatched|security\s*(?:alert|notification)|account\s*locked|otp\s*for\s*login|profile\s*updated|address\s*updated|mobile\s*number\s*updated)\b",
+    re.IGNORECASE,
+)
+
+FAILED_TRANSACTION_PATTERN = re.compile(
+    r"\b(?:failed|declined|pending|reversed|timed\s*out|cancelled|canceled|unsuccessful|rejected|could\s*not\s*process|unable\s*to\s*process)\b",
+    re.IGNORECASE,
+)
+
+BILL_REMINDER_PATTERN = re.compile(
+    r"\b(?:bill\s*reminder|payment\s*due|due\s*date|outstanding\s*amount|emi\s*due|utility\s*bill|electricity\s*bill|water\s*bill|gas\s*bill|statement\s*due|reminder\s*to\s*pay)\b",
+    re.IGNORECASE,
+)
+
+FINANCIAL_CONTEXT_PATTERN = re.compile(
+    r"\b(?:debited?|credited?|withdrawn?|withdrawal|deposited?|transferred?|transfer|paid|received|sent|purchase(?:d)?|charged|deducted|refund(?:ed)?|cashback|imps|neft|rtgs|upi|atm|pos|card|transaction|payment)\b",
+    re.IGNORECASE,
+)
+
+BALANCE_WORD_PATTERN = re.compile(
+    r"\b(?:balance|avl\.?\s*bal|available\s*balance|avail(?:able)?\s*bal|remaining\s*balance)\b",
+    re.IGNORECASE,
+)
+
+MERCHANT_NOISE_PATTERN = re.compile(
+    r"\b(?:LTD|LIMITED|PVT|PRIVATE|SERVICES|SERVICE|CITY|MUMBAI|DELHI|PUNE|BANGALORE|BENGALURU|HYDERABAD|CHENNAI|KOLKATA|NOIDA|GURGAON|CORP|CORPORATION|ENTERPRISES|INDIA\s*PVT)\b",
     re.IGNORECASE,
 )
 
@@ -248,6 +307,143 @@ def sms_body_hash(body: Optional[str], sender: Optional[str] = None) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _normalize_text(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def _keywords_hit(text: str, patterns: list[re.Pattern[str]]) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
+
+
+def _clean_entity_name(name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    cleaned = _normalize_text(name)
+    cleaned = re.sub(r"[\s\-_,.]+$", "", cleaned)
+    cleaned = MERCHANT_NOISE_PATTERN.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_.,")
+    cleaned = re.sub(r"\b(?:A/C|AC|ACC|ACCOUNT|CARD|BALANCE|AVL|AVAILABLE|AVAIL)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+
+def _extract_transaction_amount(body: str, direction: Optional[str]) -> Optional[float]:
+    """Extract the transaction amount with a small amount of contextual scoring."""
+    candidates = []
+    text = body or ""
+    for match in AMOUNT_PATTERN.finditer(text):
+        raw = match.group(1) or match.group(2)
+        if not raw:
+            continue
+        context_start = max(0, match.start() - 70)
+        context_end = min(len(text), match.end() + 70)
+        context = text[context_start:context_end]
+        score = 0
+        lower_context = context.lower()
+        if direction == "DEBIT" and DEBIT_KEYWORDS.search(context):
+            score += 5
+        if direction == "CREDIT" and CREDIT_KEYWORDS.search(context):
+            score += 5
+        if re.search(r"\b(debited|credited|paid|sent|received|transferred|withdrawn|deposited)\b", lower_context):
+            score += 3
+        if BALANCE_WORD_PATTERN.search(context):
+            score -= 3
+        if re.search(r"\b(refund|cashback|salary|stipend|interest)\b", lower_context):
+            score += 1
+        try:
+            amount = _parse_amount(raw)
+        except ValueError:
+            continue
+        candidates.append((score, amount))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][1]
+
+
+def _score_financial_confidence(body: str, parsed_amount: Optional[float], direction: Optional[str]) -> float:
+    score = 0.0
+    lower = body.lower()
+    if parsed_amount is not None:
+        score += 0.35
+    if direction in {"DEBIT", "CREDIT"}:
+        score += 0.30
+    if FINANCIAL_CONTEXT_PATTERN.search(body):
+        score += 0.20
+    if re.search(r"\b(refno|ref\s*no|txn|utr|transaction\s*(?:id|number)|imps\s*ref|upi\s*ref)\b", lower):
+        score += 0.05
+    if re.search(r"@", body):
+        score += 0.05
+    if re.search(r"\b(account|a/?c|bank|branch)\b", lower):
+        score += 0.05
+    return min(score, 0.98)
+
+
+def _classify_sms(body: Optional[str], sender: Optional[str] = None) -> tuple[str, float, str]:
+    text = _normalize_text(body)
+    sender_text = _normalize_text(sender).upper()
+    lower = text.lower()
+
+    if not text:
+        return "UNKNOWN", 0.0, "Empty body"
+
+    if OTP_PATTERN.search(text):
+        return "OTP", 0.99, "Matched OTP or verification pattern"
+
+    # If promotional cues are strong (cashback, win, use code, offer)
+    # prefer PROMOTIONAL even when an amount appears — these are marketing
+    # messages that mention amounts, not real transactions.
+    promo_hit = PROMOTIONAL_PATTERN.search(text) or SPAM_BODY_PATTERN.search(text) or (sender_text and SPAM_SENDER_PATTERN.search(sender_text))
+    promo_explicit = re.search(r"\b(use code|code:|win\b|cashback|assured|chance to win|apply now|buy now|order now|offer|coupon)\b", text, re.IGNORECASE)
+    if promo_hit:
+        # If there's a clear transaction indicator (ref/txn/UPI/payment summary), keep checking;
+        # otherwise treat as promotional. If explicit promo keywords are present, classify promotional.
+        if not (REF_PATTERN.search(text) or re.search(r"\b(payment summary|payment successful|transaction of|transaction is successful|your transaction|payment processed|you paid|payment of|you paid using|you paid via)\b", text, re.IGNORECASE)):
+            return "PROMOTIONAL", 0.96, "Matched promotional/spam pattern (marketing with amount)"
+        if promo_explicit:
+            return "PROMOTIONAL", 0.96, "Explicit promotional keywords present"
+
+    # Demote messages that talk about potential/conditional payments (not confirmed transactions).
+    # Keep this narrow: many valid bank SMS include safety disclaimers like "If not you, call ...".
+    conditional_pattern = re.compile(
+        r"\b(payment is being processed|in case the payment fails|will be added as previous dues|"
+        r"may be added as previous dues|added as previous dues|payment pending|request(?:ed)? money from you)\b",
+        re.IGNORECASE,
+    )
+    if conditional_pattern.search(text):
+        return "UNKNOWN", 0.20, "Conditional or uncertain payment language detected"
+
+    if BANKING_ALERT_PATTERN.search(text):
+        return "BANKING_ALERT", 0.94, "Matched banking alert pattern"
+
+    if FAILED_TRANSACTION_PATTERN.search(text):
+        return "FAILED_TRANSACTION", 0.97, "Matched failed transaction pattern"
+
+    if BILL_REMINDER_PATTERN.search(text):
+        return "BILL_REMINDER", 0.92, "Matched bill reminder pattern"
+
+    direction = None
+    if re.search(r"\bcredited\b", lower):
+        direction = "CREDIT"
+    elif re.search(r"\bdebited\b", lower):
+        direction = "DEBIT"
+    elif CREDIT_KEYWORDS.search(text):
+        direction = "CREDIT"
+    elif DEBIT_KEYWORDS.search(text):
+        direction = "DEBIT"
+
+    amount = _extract_transaction_amount(text, direction)
+    if amount is not None and direction and FINANCIAL_CONTEXT_PATTERN.search(text):
+        confidence = _score_financial_confidence(text, amount, direction)
+        reason = "Amount, direction, and financial context detected"
+        return "FINANCIAL_TRANSACTION", confidence, reason
+
+    return "UNKNOWN", 0.25, "Insufficient financial evidence"
+
+
 # -------------------------------------------------------
 # Private extraction helpers
 # -------------------------------------------------------
@@ -282,14 +478,7 @@ def _extract_first_amount(body: str) -> Optional[float]:
     Return the first (usually transaction) amount from the SMS body.
     Handles Rs., INR, ₹ prefixes and 'debited by / credited with N' patterns.
     """
-    for m in AMOUNT_PATTERN.finditer(body):
-        raw = m.group(1) or m.group(2)
-        if raw:
-            try:
-                return _parse_amount(raw)
-            except ValueError:
-                continue
-    return None
+    return _extract_transaction_amount(body, None)
 
 
 def _extract_balance(body: str) -> Optional[float]:
@@ -357,7 +546,7 @@ def _extract_recipient(body: str, direction: Optional[str]) -> Optional[str]:
 
             # Clean trailing punctuation
             name = re.sub(r"[-_.,]+$", "", name).strip()
-            return name if name else None
+            return _clean_entity_name(name)
 
     return None
 
@@ -369,7 +558,7 @@ def _fallback_merchant_extraction(body: str, sender: str, bank: Optional[str]) -
     )
     match = known_merchants.search(body)
     if match:
-        return match.group(1).title()
+        return _clean_entity_name(match.group(1).title())
     
     # 2. Use sender if it's not a generic bank sender
     if sender and sender.strip() and sender.lower() != "partner":
@@ -380,14 +569,25 @@ def _fallback_merchant_extraction(body: str, sender: str, bank: Optional[str]) -
             return None
         if "UPI" in clean_sender.upper():
             return None
-        return clean_sender
+        return _clean_entity_name(clean_sender)
 
+    return None
+
+
+def _fallback_account_recipient(body: str, user_account_suffix: Optional[str]) -> Optional[str]:
+    """Find an alternative account number in the body that is NOT the user's account."""
+    matches = list(ACCOUNT_PATTERN.finditer(body))
+    for match in matches:
+        acc_num = match.group(1) or match.group(2)
+        if acc_num and acc_num != user_account_suffix:
+            return f"A/C *{acc_num}"
     return None
 
 
 def _is_spam(body: str, sender: Optional[str]) -> bool:
     """Return True if the message looks like an ad / promotional spam."""
-    if sender and SPAM_SENDER_PATTERN.search(sender):
+    sender_text = sender or ""
+    if sender_text and SPAM_SENDER_PATTERN.search(sender_text):
         # Some bank senders share roots with telcos — only flag if no financial kwds
         if not FINANCIAL_KEYWORDS.search(body or ""):
             return True
@@ -412,66 +612,77 @@ def parse_sms_body(body: Optional[str], sender: Optional[str] = None) -> ParsedT
         ParsedTransaction — all fields are Optional; is_financial=False if not financial.
     """
     result = ParsedTransaction()
+    text = _normalize_text(body)
+    label, confidence, reason = _classify_sms(text, sender)
+    result.classification_label = label if label in SMS_LABELS else "UNKNOWN"
+    result.classification_confidence = confidence
+    result.classification_reason = reason
 
-    if not body:
+    if not text:
         return result
 
-    # Gate 1 — must contain at least one financial keyword
-    if not FINANCIAL_KEYWORDS.search(body):
-        return result
-
-    # Gate 2 — reject spam / promotions
-    if _is_spam(body, sender):
-        logger.debug("Skipping spam/promotional message from sender=%s", sender)
-        return result
-
-    # Gate 3 — reject failed transactions
-    if FAILURE_GATE.search(body):
-        logger.info("Skipping failed/declined transaction message: %s", body[:50])
+    if result.classification_label != "FINANCIAL_TRANSACTION":
+        result.is_financial = False
         return result
 
     result.is_financial = True
 
     # --- Amount ---
-    result.amount = _extract_first_amount(body)
+    result.amount = _extract_first_amount(text)
 
     # --- Direction ---
-    body_lower = body.lower()
+    body_lower = text.lower()
     if "credited" in body_lower:
         result.direction = "CREDIT"
     elif "debited" in body_lower:
         result.direction = "DEBIT"
-    elif DEBIT_KEYWORDS.search(body):
+    elif DEBIT_KEYWORDS.search(text):
         result.direction = "DEBIT"
-    elif CREDIT_KEYWORDS.search(body):
+    elif CREDIT_KEYWORDS.search(text):
         result.direction = "CREDIT"
 
-    # Sanity: if no amount or no direction, not a true financial transaction
+    # Sanity: if no amount or no direction, demote to UNKNOWN for downstream review.
     if result.amount is None or result.direction is None:
         result.is_financial = False
+        result.classification_label = "UNKNOWN"
+        result.classification_confidence = min(result.classification_confidence, 0.35)
+        result.classification_reason = "Insufficient financial evidence after extraction"
+        return result
 
     # --- Bank ---
-    result.bank = _detect_bank_from_sender(sender) or _detect_bank_from_body(body)
+    result.bank = _detect_bank_from_sender(sender) or _detect_bank_from_body(text)
 
     # --- UPI ID ---
-    result.upi_id = _extract_upi_id(body)
+    result.upi_id = _extract_upi_id(text)
 
     # --- Transaction mode ---
-    result.transaction_mode = _extract_mode(body)
+    result.transaction_mode = _extract_mode(text)
 
     # --- Account suffix ---
-    result.account_suffix = _extract_account_suffix(body)
+    result.account_suffix = _extract_account_suffix(text)
 
     # --- Balance ---
-    result.balance_after = _extract_balance(body)
+    result.balance_after = _extract_balance(text)
 
     # --- Reference ID ---
-    result.ref_id = _extract_ref_id(body)
+    result.ref_id = _extract_ref_id(text)
 
     # --- Recipient ---
-    result.recipient_name = _extract_recipient(body, result.direction)
+    result.recipient_name = _extract_recipient(text, result.direction)
     if not result.recipient_name:
-        result.recipient_name = _fallback_merchant_extraction(body, sender, result.bank)
+        result.recipient_name = _fallback_merchant_extraction(text, sender or "", result.bank)
+    if not result.recipient_name:
+        result.recipient_name = _fallback_account_recipient(text, result.account_suffix)
+
+    result.recipient_name = _clean_entity_name(result.recipient_name)
+
+    # Recompute confidence for successful financial extraction with richer signals.
+    result.classification_confidence = max(
+        result.classification_confidence,
+        _score_financial_confidence(text, result.amount, result.direction),
+    )
+    result.classification_label = "FINANCIAL_TRANSACTION"
+    result.classification_reason = "Validated financial transaction with structured fields extracted"
 
     logger.info(
         "Parsed SMS | financial=%s | amt=%.2f | dir=%s | bank=%s | mode=%s | ref=%s",

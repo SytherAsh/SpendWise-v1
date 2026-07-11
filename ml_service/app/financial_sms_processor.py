@@ -20,6 +20,16 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+UNKNOWN_REVIEW_THRESHOLD = 0.75
+UNKNOWN_REVIEW_COLUMNS = [
+    "body",
+    "sender",
+    "predicted_label",
+    "confidence",
+    "review_status",
+    "true_label",
+]
+
 
 class FinancialSmsProcessor:
     """
@@ -32,10 +42,12 @@ class FinancialSmsProcessor:
         input_file: str = "data/captured_sms.csv",
         output_file: str = "data/clean_sms_eda.csv",
         financial_output_file: str = "data/true_financial_sms.csv",
+        unknown_output_file: str = "data/unknown_sms.csv",
     ):
         self.input_file            = input_file
         self.output_file           = output_file
         self.financial_output_file = financial_output_file
+        self.unknown_output_file    = unknown_output_file
 
     # ------------------------------------------------------------------
     # Internal parsing
@@ -64,12 +76,49 @@ class FinancialSmsProcessor:
         df["parsed_ref_id"]       = [p.ref_id for p in parsed_results]
         df["parsed_entity"]       = [p.recipient_name for p in parsed_results]
         df["parsed_bank"]         = [p.bank for p in parsed_results]
+        df["classification_label"] = [p.classification_label for p in parsed_results]
+        df["classification_confidence"] = [p.classification_confidence for p in parsed_results]
+        df["classification_reason"] = [p.classification_reason for p in parsed_results]
 
         # Fix the recipient and entity columns to use the properly cleaned entity
         df["recipient"] = df["parsed_entity"]
         df["entity"] = df["parsed_entity"]
 
         return df
+
+    def _normalize_clean_sms_frame(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepare the cleaned SMS dataframe for storage and downstream analytics."""
+        df = df.copy()
+        df["body"] = df["body"].fillna("").astype(str)
+        df["sender"] = df["sender"].fillna("").astype(str)
+        df["entity"] = df["entity"].fillna("").astype(str)
+        df["recipient"] = df["recipient"].fillna("").astype(str)
+        df["classification_label"] = df["classification_label"].fillna("UNKNOWN")
+        df["classification_confidence"] = pd.to_numeric(df["classification_confidence"], errors="coerce").fillna(0.0)
+        df["classification_reason"] = df["classification_reason"].fillna("").astype(str)
+        return df
+
+    def _build_unknown_review_queue(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create a dataset for messages that still need human review."""
+        review_df = df[
+            (df["classification_label"].eq("UNKNOWN"))
+            | (df["classification_confidence"].fillna(0) < UNKNOWN_REVIEW_THRESHOLD)
+        ].copy()
+
+        if review_df.empty:
+            return pd.DataFrame(columns=UNKNOWN_REVIEW_COLUMNS)
+
+        review_df["predicted_label"] = review_df["classification_label"].fillna("UNKNOWN")
+        review_df["confidence"] = pd.to_numeric(review_df["classification_confidence"], errors="coerce").fillna(0.0)
+        review_df["review_status"] = np.where(
+            review_df["predicted_label"].eq("UNKNOWN"),
+            "needs_label",
+            "needs_review",
+        )
+        review_df["true_label"] = ""
+        review_df["body"] = review_df["body"].fillna("").astype(str)
+        review_df["sender"] = review_df["sender"].fillna("").astype(str)
+        return review_df[UNKNOWN_REVIEW_COLUMNS].drop_duplicates().reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # Main pipeline
@@ -110,7 +159,8 @@ class FinancialSmsProcessor:
         # 2. Normalise mixed timestamp formats (epoch ms OR ISO strings)
         numeric_ms  = pd.to_numeric(df["timestamp_ms"], errors="coerce")
         dt_from_ms  = pd.to_datetime(numeric_ms, unit="ms", utc=True, errors="coerce")
-        dt_from_str = pd.to_datetime(df["timestamp_ms"], utc=True, errors="coerce")
+        string_ms = df["timestamp_ms"].where(numeric_ms.isna())
+        dt_from_str = pd.to_datetime(string_ms, utc=True, errors="coerce", format="mixed")
         df["parsed_datetime"] = dt_from_ms.fillna(dt_from_str)
 
         # 3. Drop invalid timestamps
@@ -126,6 +176,8 @@ class FinancialSmsProcessor:
         print("Parsing financial details using Regex...")
         df = self._parse_financial_sms(df)
 
+        df = self._normalize_clean_sms_frame(df)
+
         # Promote parsed columns → canonical columns
         df["is_financial"] = df["parsed_is_financial"]
         df["amount"]       = df["parsed_amount"]
@@ -139,11 +191,10 @@ class FinancialSmsProcessor:
         ]
         df = df.drop(columns=cols_to_drop)
 
-        # 6. Cross-platform deduplication (2-min window)
+        # 6. Cross-platform deduplication (same day window)
         pre_dedup = len(df)
-        df["time_bucket_2m"] = df["parsed_datetime"].dt.floor("2min")
-        df = df.drop_duplicates(subset=["amount", "direction", "time_bucket_2m"])
-        df = df.drop(columns=["time_bucket_2m", "parsed_datetime"])
+        df = df.drop_duplicates(subset=["amount", "direction", "date"])
+        df = df.drop(columns=["parsed_datetime"])
         cross_dup = pre_dedup - len(df)
         if cross_dup:
             print(f"Removed {cross_dup} cross-platform duplicates (SMS + Notification overlap).")
@@ -152,9 +203,21 @@ class FinancialSmsProcessor:
         df.to_csv(self.output_file, index=False)
         print(f"Success! Clean data saved to: {self.output_file}")
 
-        financial_df = df[df["is_financial"] == True]
+        financial_df = df[df["classification_label"].eq("FINANCIAL_TRANSACTION")].copy()
+        unknown_df = self._build_unknown_review_queue(df)
+
+        # Clean up massive multiline bodies for the output CSV/Supabase
+        financial_df["body"] = financial_df["body"].str.replace(r"\n|\r", " ", regex=True)
+        # If it's a Rapido invoice, just simplify it completely
+        financial_df.loc[financial_df["body"].str.contains("Rapido Invoice", na=False, case=False), "body"] = "Rapido Ride"
+        # Truncate any remaining long strings so they don't break the CSV
+        financial_df["body"] = financial_df["body"].str[:150]
+
         financial_df.to_csv(self.financial_output_file, index=False)
         print(f"Saved strictly financial data to: {self.financial_output_file}")
+
+        unknown_df.to_csv(self.unknown_output_file, index=False)
+        print(f"Saved unknown review queue to: {self.unknown_output_file}")
 
         # 8. Optional Supabase push
         supabase_pushed = 0
@@ -165,7 +228,9 @@ class FinancialSmsProcessor:
         summary = {
             "total_records":                len(df),
             "financial_count":              len(financial_df),
+            "unknown_count":                len(unknown_df),
             "cross_platform_duplicates_removed": cross_dup,
+            "label_counts":                 df["classification_label"].value_counts(dropna=False).to_dict(),
         }
         if push_to_supabase:
             summary["supabase_pushed"]  = supabase_pushed

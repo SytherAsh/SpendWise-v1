@@ -37,6 +37,9 @@ class ParsedTransaction(BaseModel):
     balance_after: Optional[float] = None
     ref_id: Optional[str] = None             # Reference / transaction ID from SMS body
     is_financial: bool = False               # Whether the message was identified as financial
+    classification_label: str = "UNKNOWN"
+    classification_confidence: float = 0.0
+    classification_reason: Optional[str] = None
 
     @field_validator("amount", "balance_after", mode="before")
     @classmethod
@@ -72,6 +75,16 @@ class ParsedTransaction(BaseModel):
             return None
         digits = "".join(filter(str.isdigit, str(v)))
         return digits[-4:] if len(digits) >= 4 else (digits or None)
+
+    @field_validator("classification_confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, v):
+        if v is None:
+            return 0.0
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            return 0.0
 
 
 # -------------------------------------------------------
