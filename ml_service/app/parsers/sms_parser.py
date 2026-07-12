@@ -148,9 +148,14 @@ REF_PATTERN = re.compile(
 
 # Recipient extraction — "to NAME", "paid to SHOP", "trf to ENTITY"
 RECIPIENT_DEBIT_PATTERNS = [
+    # Excludes "to block ..." -- nearly every SBI SMS ends with a fraud-safety line
+    # ("...fwd this SMS to 9223008333 ... to block UPI" / "...to block your card.
+    # Call 18001234...") and, without this guard, that's the only "to X" in messages
+    # that never actually name a recipient (e.g. terse UPI debit confirmations) or it
+    # shadows a real recipient found by a later pattern (e.g. ATM "withdrawn at ...").
     re.compile(
         r"(?:trf\s+to|transfer(?:red)?\s+to|paid\s+to|sent\s+to|to)\s+"
-        r"([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
+        r"(?!block\b)([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
         re.IGNORECASE,
     ),
     re.compile(
@@ -172,6 +177,14 @@ RECIPIENT_CREDIT_PATTERNS = [
         r"linked\s+to\s+mobile\s+[0-9Xx]+\s*-\s*([A-Za-z][A-Za-z .]{1,35}?)\s*(?:\(|$)",
         re.IGNORECASE,
     ),
+    # SBI "Deposit by transfer from NAME": the generic "\bby" alternative below matches
+    # at "by" (before "transfer from" is ever tried, since regex takes the earliest
+    # position, not the best pattern) and captures the word "transfer" itself. This
+    # dedicated pattern must come first so "from NAME" wins.
+    re.compile(
+        r"by\s+transfer\s+from\s+([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"(?:transfer(?:red)?\s+from|received\s+from|from|\bby)\s+"
         r"(?!\s*(?:Rs\.?|INR|₹))([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
@@ -181,7 +194,7 @@ RECIPIENT_CREDIT_PATTERNS = [
 
 # Never a real counterparty — these come from safety boilerplate ("If not done by you")
 # or partial matches on structural words.
-RECIPIENT_JUNK = {"you", "u", "your", "a", "a/c", "ac", "the", "call", "block", "upi"}
+RECIPIENT_JUNK = {"you", "u", "your", "a", "a/c", "ac", "the", "call", "block", "upi", "transfer"}
 
 # Words that terminate a recipient name
 RECIPIENT_TERMINATORS = re.compile(

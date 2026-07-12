@@ -138,6 +138,7 @@ and are also indexed in `docs/README.md`.
 | Persistence | `ml_service/app/clients/supabase_client.py`, `app/schemas/transaction.py` | Supabase client + Pydantic shapes |
 | Offline Excel ETL (prior art) | `ml_preprocessing/CSV_PARSER.ipynb`, `Segregation.ipynb` | Decrypt + parse raw bank Excel exports into a clean workbook |
 | Merchant normalization | `ml_preprocessing/MerchantNormalization.ipynb`, `merchant_normalizer.py` | Canonicalize recipient/merchant names |
+| Statement/SMS merge | `ml_preprocessing/build_unified_dataset.py` | Backfill statement's truncated recipient names from SMS, append SMS-only transactions → `CSVS/SpendWise_Unified_Merchants.xlsx` |
 | Bank-statement pipeline (new) | {{TODO: fill in once built}} | PDF/Excel statement → clean CSV + merchant name |
 | Website/frontend | {{TODO: not yet started}} | Upload UI + analytics display |
 

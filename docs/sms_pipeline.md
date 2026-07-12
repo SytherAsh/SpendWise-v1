@@ -173,10 +173,41 @@ transactions **already exist there**. A manual audit (2026-07-12, see
 | Remaining, no statement match at all | 168 | Genuine SMS-only |
 | **Total** | **1,078** | **909 duplicates / 169 genuinely SMS-only** |
 
-**Implication: don't feed `true_financial_sms.csv` into the same store as the bank-statement pipeline's
-output without a merge/dedup step first** — doing so as-is would double-count 909 of 1,078 transactions.
-That merge (dedupe the 909, keep the 169 as net-new, optionally backfill the statement's truncated
-recipient names from the fuller SMS names for the 846+54 overlapping rows) is not yet built.
+**This merge is now built**: `ml_preprocessing/build_unified_dataset.py` produces
+`ml_preprocessing/CSVS/SpendWise_Unified_Merchants.xlsx` — the bank statement as the base (1,917 rows),
+with recipient names backfilled from the fuller SMS name wherever unambiguously matched (821 rows), and
+the 169 genuinely SMS-only transactions appended as new rows — 2,086 rows total, deduped, one source of
+truth. Every SMS row gets exactly one outcome (`backfilled` / `no_name` / `ambiguous` / `new`), asserted
+in code to sum to the SMS financial count so a routing bug can't silently duplicate or drop a row. The 6
+same-day/same-amount Airtel pairs are confirmed real duplicates but not safely 1:1-pairable by
+reference id, so their statement names are intentionally left untouched rather than risk a wrong
+pairing. Re-run the script whenever `captured_sms.csv` gets new data.
+
+### Recipient canonicalization (`ml_preprocessing/merchant_normalizer.py`)
+
+After the merge, `Recipient_Canonical` is recomputed from scratch over the whole unified dataset (UPI-ID
+grouping + fuzzy name clustering, pre-existing tooling) plus two additions from 2026-07-12:
+
+- **`_first_names_conflict` safety guard** — fixes a real bug found during this pass: two different real
+  people sharing a UPI ID (a family's shared payment handle) could be merged into one canonical name if
+  their names shared enough tokens (`"PRACHI SAMEER SAWANT"` was being folded into `"YASH SAMEER
+  SAWANT"` — different first names, same surname). The guard forces two names with unambiguously
+  different, non-prefix-related first tokens into different clusters regardless of similarity score or
+  shared UPI ID.
+- **`merge_prefix_chains`** — safely auto-merges truncation-prefix variants (`"SAMEER B"` →
+  `"SAMEER BALIRAM SAWA"`) that the existing fuzzy-similarity tiers miss (too dissimilar by
+  length-penalized string metrics). Merges a variant into the single unambiguous longer form it chains
+  into; if a short form is compatible with two or more genuinely different longer names in the same
+  component (e.g. two different people both named `"MAHENDRA ..."`), it's correctly left unmerged rather
+  than guessed.
+- A small hand-curated `MANUAL_ALIASES` map in `build_unified_dataset.py` covers the residual cases that
+  are unsafe to merge algorithmically but safe by real-world knowledge (e.g. `"BHARTI AIRTEL LI"` /
+  `"AIRTEL PREPAID R"` are the same telecom company, not a name-prefix relationship) — kept deliberately
+  small; not a general-purpose alias system.
+
+Known residual gap: title-prefixed variants (`"Mr. SAMEER BALIRAM S"`) don't merge into their untitled
+form, because `find_prefix_variants` generates candidates from raw string prefixes and a leading title
+breaks that match. Low-impact (a handful of rows); not yet fixed.
 
 ## Known gaps / open questions
 
@@ -195,6 +226,8 @@ recipient names from the fuller SMS names for the 846+54 overlapping rows) is no
   is simply unverified until other banks' SMS appear in the data.
 - **No supervised model yet** — classification is entirely rule-based. Layering a model over the
   `UNKNOWN` bucket needs the labeled sample above first.
-- **No merge against the bank statement yet** — see "SMS vs. bank-statement overlap" above. 909 of the
-  1,078 current financial rows are duplicates of statement transactions; a merge/dedup step is needed
-  before combining both sources into one store.
+- **Unified dataset needs categorization labels.** `SpendWise_Unified_Merchants.xlsx` has clean,
+  backfilled recipient names but no `category` column — the existing `SpendWise_4yrs_Labelled.xlsx`
+  (1,810 rows) is a separate, older labeling pass that needs re-linking to this dataset and has its own
+  quality issue (its `Transfers` category is a catch-all: ~50% of all labels, mixing genuine
+  person-to-person transfers with mislabeled real spending).

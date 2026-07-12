@@ -123,6 +123,42 @@ def group_by_upi_id(
     return mapping
 
 
+_TITLE_TOKENS = {"MR", "MRS", "MS", "MISS", "DR"}
+
+
+def _first_token(name: str) -> str:
+    """First non-title token of a name (skips Mr/Mrs/Ms/Dr/Miss)."""
+    for tok in re.sub(r"[.,]", "", name).split():
+        if tok.upper() not in _TITLE_TOKENS:
+            return tok.upper()
+    return ""
+
+
+def _first_names_conflict(a: str, b: str) -> bool:
+    """True if two names unambiguously belong to different people/entities.
+
+    Two real people can share a payment channel (e.g. a family UPI ID shared
+    between spouses), and their full names can still score high on token-level
+    fuzzy similarity if they share a surname ("PRACHI SAMEER SAWANT" vs
+    "YASH SAMEER SAWANT" share 2 of 3 tokens). Fuzzy similarity alone can't
+    tell them apart, but their first names unambiguously can — so this is
+    checked independently of the similarity score and forces those two names
+    into different clusters no matter how similar the rest of the string is.
+
+    Deliberately narrow to avoid false positives: only fires when the first
+    tokens differ AND neither is a prefix of the other (so truncation
+    variants of the SAME name, e.g. "SAM" vs "SAMEER", are still allowed to
+    merge). Company names ("AIRTEL" vs "BHARTI AIRTEL") aren't first-name
+    patterns and rarely collide here since they don't usually share a UPI ID
+    with an unrelated company; genuine remaining cases are still catchable
+    via `find_prefix_variants` + a manually-reviewed alias.
+    """
+    ta, tb = _first_token(a), _first_token(b)
+    if not ta or not tb or ta == tb:
+        return False
+    return not (ta.startswith(tb) or tb.startswith(ta))
+
+
 def cluster_by_fuzzy_name(names: list, threshold: int = 90) -> dict:
     """Cluster a list of normalized names by fuzzy similarity (complete linkage).
 
@@ -130,6 +166,10 @@ def cluster_by_fuzzy_name(names: list, threshold: int = 90) -> dict:
     which avoids the single-linkage "chaining" failure mode (A~B~C merged
     transitively even though A and C are unrelated) that connected-components
     clustering is prone to, especially with short truncated names.
+
+    A conflicting-first-name pair (see `_first_names_conflict`) is forced to
+    maximum distance regardless of its raw similarity score, so two different
+    real people sharing a payment channel are never merged by this tier.
 
     Returns {name: canonical_name}; canonical = most frequent variant
     among `names` (ties broken by shorter string).
@@ -144,7 +184,10 @@ def cluster_by_fuzzy_name(names: list, threshold: int = 90) -> dict:
     distance = np.zeros((n, n))
     for i in range(n):
         for j in range(i + 1, n):
-            score = fuzz.token_sort_ratio(unique_names[i], unique_names[j])
+            if _first_names_conflict(unique_names[i], unique_names[j]):
+                score = 0
+            else:
+                score = fuzz.token_sort_ratio(unique_names[i], unique_names[j])
             distance[i, j] = distance[j, i] = 100 - score
 
     condensed = squareform(distance, checks=False)
@@ -229,3 +272,92 @@ def find_prefix_variants(names, min_len: int = 6) -> list:
         if len(short) >= min_len and short != long_ and long_.startswith(short):
             pairs.append((short, long_))
     return pairs
+
+
+def _chains(a: str, b: str) -> bool:
+    """Whitespace-tolerant prefix check: True if one name is a prefix of the other
+    once spaces are removed.
+
+    Plain `str.startswith` misses same-payee pairs where extraction inserted a stray
+    space (e.g. "SAMEER B ALIRAM" vs "SAMEER BALIRAM SAWA" -- same person, differ only
+    by that one space), while still correctly rejecting two different people who merely
+    share a leading word (e.g. "MAHENDRA DUNGARS" vs "MAHENDRA KAILAS KOLI" diverge
+    right after "MAHENDRA" even with spaces stripped).
+    """
+    sa, sb = a.replace(" ", ""), b.replace(" ", "")
+    return sa.startswith(sb) or sb.startswith(sa)
+
+
+def merge_prefix_chains(names, min_len: int = 6) -> dict:
+    """Safely auto-merge truncation-prefix variants of canonical names.
+
+    Builds a graph from `find_prefix_variants` pairs (a short name is a prefix of a
+    longer one) so all variants of one entity end up in the same connected
+    component. Within a component, some names may be "maximal" -- nothing longer
+    in the component chains from them, so they're candidate true forms. A
+    non-maximal member merges into a maximal one ONLY if it chains with EXACTLY
+    ONE maximal name in the component; otherwise it's ambiguous and is left as
+    itself, mapped to nothing.
+
+    This "exactly one" rule is what keeps it safe on two different failure modes
+    found on real data:
+
+    - Two different real people/entities sharing a short common prefix (e.g.
+      "MAHENDRA DUNGARS" vs "MAHENDRA KAILAS KOLI") are both maximal (neither
+      chains into the other), so bare "MAHENDRA" chains with BOTH of them and is
+      correctly left unmerged rather than arbitrarily attributed to whichever
+      happens to have the longer string.
+    - A component can contain one genuine outlier that shares a short prefix but
+      isn't actually a truncation of the "main" chain (e.g. "SAMEER SAWANT" omits
+      the middle name "Baliram" entirely, so it doesn't chain with "SAMEER
+      BALIRAM SAWA" even though both reduce from "SAMEER" and are the same real
+      person) -- it becomes its own second maximal name, and every OTHER member
+      that chains only with the main chain still merges correctly; only the
+      genuine outlier (and any name ambiguous between the two) stays unmerged.
+
+    Returns {name: canonical_name} for every name passed in (unmerged names map
+    to themselves). Call `find_prefix_variants` directly first if you want to
+    review candidates by hand before trusting this.
+    """
+    names = list(dict.fromkeys(names))
+    pairs = find_prefix_variants(names, min_len=min_len)
+
+    # Union-find over names connected by a prefix-variant edge, for grouping only.
+    parent = {n: n for n in names}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for short, long_ in pairs:
+        union(short, long_)
+
+    components: dict = {}
+    for n in names:
+        components.setdefault(find(n), []).append(n)
+
+    mapping = {}
+    for members in components.values():
+        if len(members) == 1:
+            mapping[members[0]] = members[0]
+            continue
+
+        # Maximal = nothing strictly longer in this component chains from it.
+        maximal = [
+            m for m in members
+            if not any(len(o) > len(m) and _chains(m, o) for o in members if o != m)
+        ]
+        for m in members:
+            if m in maximal:
+                mapping[m] = m
+                continue
+            targets = [mx for mx in maximal if _chains(m, mx)]
+            mapping[m] = targets[0] if len(targets) == 1 else m
+    return mapping
