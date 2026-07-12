@@ -15,9 +15,9 @@
 
 - No automated test suite today — correctness is currently checked via in-notebook validation cells
   (e.g. `Segregation.ipynb`'s `validate_dataframe` pass, the "100% CLEAN DATA" checks).
-- {{TODO: once regex/cleaning logic is extracted into testable modules (as `merchant_normalizer.py`
-  already is), add pytest coverage for it alongside `ml_service/tests/` or a parallel
-  `ml_preprocessing/tests/`.}}
+- {{TODO: `merchant_normalizer.py` and `build_unified_dataset.py` now live in
+  `ml_service/app/services/` (moved 2026-07-12) precisely so they're testable — add pytest coverage
+  for them in `ml_service/tests/` alongside the existing SMS-pipeline tests.}}
 
 ## Bank-statement pipeline (current task focus)
 

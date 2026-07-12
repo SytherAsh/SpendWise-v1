@@ -14,12 +14,16 @@ the pattern this repo actually follows.
 
 ## Coding standards
 
-- **Notebooks** (`ml_preprocessing/`): keep cells re-runnable top-to-bottom; extract genuinely
-  reusable logic (regex rules, cleaning helpers) into a plain `.py` module (e.g.
-  `merchant_normalizer.py`) once it's used from more than one notebook or needs test coverage.
+- **Notebooks** (`ml_preprocessing/`): `.ipynb` files and their `CSVS/` data artifacts only — no
+  `.py` modules live here. Keep cells re-runnable top-to-bottom; extract genuinely reusable logic
+  (regex rules, cleaning helpers) into a plain `.py` module under `ml_service/app/services/` (e.g.
+  `merchant_normalizer.py`, `build_unified_dataset.py`) once it's used from more than one notebook
+  or needs test coverage — import it back into the notebook via a `sys.path` bootstrap (see
+  `SMS_Pipeline.ipynb` / `BuildUnifiedDataset.ipynb` for the pattern).
 - **`ml_service`**: Pydantic models in `app/schemas/`, routes thin (`app/routes/`), business logic in
-  `app/services/` (`persistence.py`, `sms_pipeline.py`), parsing/extraction in `app/parsers/`
-  (`sms_parser.py`, `excel_loader.py`), external clients in `app/clients/` (`supabase_client.py`).
+  `app/services/` (`persistence.py`, `sms_pipeline.py`, `merchant_normalizer.py`,
+  `build_unified_dataset.py`), parsing/extraction in `app/parsers/` (`sms_parser.py`,
+  `excel_loader.py`), external clients in `app/clients/` (`supabase_client.py`).
 - {{TODO: add linting/formatting tooling here once adopted (e.g. ruff/black, notebook output
   stripping via nbstripout) — none is currently enforced.}}
 

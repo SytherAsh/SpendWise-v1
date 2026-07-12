@@ -32,7 +32,7 @@ merge_prefix_chains can detect) -- kept deliberately small; anything not obvious
 a company/recurring-income-source name is left for a real manual review pass
 instead of guessing.
 
-Run from anywhere:  python ml_preprocessing/build_unified_dataset.py
+Run from ml_service/:  python -m app.services.build_unified_dataset
 Requires ml_service/data/captured_sms.csv to exist (real SMS capture).
 """
 from __future__ import annotations
@@ -40,11 +40,11 @@ from __future__ import annotations
 import logging
 import os
 import re
-import sys
 
 import pandas as pd
 
-from merchant_normalizer import merge_prefix_chains, normalize_recipients, SENTINELS
+from app.services.merchant_normalizer import merge_prefix_chains, normalize_recipients, SENTINELS
+from app.services.sms_pipeline import SmsPipeline
 
 # Confirmed same real-world entity despite not chaining as a name-prefix (different
 # word order / suffix, not a truncation) -- safe because these are companies or a
@@ -62,12 +62,11 @@ MANUAL_ALIASES = {
 
 logging.disable(logging.INFO)
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_ML_SERVICE = os.path.join(_REPO_ROOT, "ml_service")
-if _ML_SERVICE not in sys.path:
-    sys.path.insert(0, _ML_SERVICE)
-
-from app.services.sms_pipeline import SmsPipeline  # noqa: E402
+# This file lives at ml_service/app/services/ -- walk up to ml_service/, then to the
+# repo root, so paths resolve correctly regardless of the working directory it's run
+# from (matches the same pattern sms_pipeline.py uses for its own data/ paths).
+_ML_SERVICE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT = os.path.dirname(_ML_SERVICE_ROOT)
 
 WB_PATH = os.path.join(_REPO_ROOT, "ml_preprocessing", "CSVS", "SpendWise_4yrs_Clean_Merchants.xlsx")
 OUT_PATH = os.path.join(_REPO_ROOT, "ml_preprocessing", "CSVS", "SpendWise_Unified_Merchants.xlsx")

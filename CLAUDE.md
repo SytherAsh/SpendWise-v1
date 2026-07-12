@@ -82,14 +82,17 @@ authoritative for this task.
 
 ## Repo layout
 
-- `ml_preprocessing/` — Jupyter notebooks for offline ETL/EDA
+- `ml_preprocessing/` — Jupyter notebooks **only** (no `.py` modules — reusable logic
+  lives in `ml_service/app/services/`, imported into notebooks via a `sys.path`
+  bootstrap, same pattern as `SMS_Pipeline.ipynb`) for offline ETL/EDA
   (`Segregation.ipynb`, `EDA.ipynb`, `Analyse.ipynb`, `CSV_PARSER.ipynb`,
   `MerchantNormalization.ipynb`) and their CSV/Excel artifacts under `CSVS/`.
-  `SMS_Pipeline.ipynb` is a cell-by-cell reference walkthrough of the live
-  `ml_service/app/services/sms_pipeline.py` — it imports and runs the real
-  pipeline code rather than reimplementing it, so it can't drift out of sync.
-  `Raw_SmS.ipynb` is earlier exploratory work that predates the current
-  SMS-pipeline architecture; kept for history, not authoritative.
+  `SMS_Pipeline.ipynb` and `BuildUnifiedDataset.ipynb` are cell-by-cell reference
+  walkthroughs of the live `ml_service/app/services/sms_pipeline.py` and
+  `build_unified_dataset.py` — they import and run the real pipeline code rather
+  than reimplementing it, so they can't drift out of sync. `Raw_SmS.ipynb` is
+  earlier exploratory work that predates the current SMS-pipeline architecture;
+  kept for history, not authoritative.
 - `ml_service/` — FastAPI Python service: SMS ingestion, Excel bulk-load,
   rule-based categorization, Supabase persistence. This is where the new
   statement-upload pipeline will likely live (new route + module), unless
@@ -137,8 +140,9 @@ and are also indexed in `docs/README.md`.
 | Transaction API | `ml_service/app/routes/transaction.py`, `app/services/persistence.py` | CRUD + logic endpoints over persisted transactions |
 | Persistence | `ml_service/app/clients/supabase_client.py`, `app/schemas/transaction.py` | Supabase client + Pydantic shapes |
 | Offline Excel ETL (prior art) | `ml_preprocessing/CSV_PARSER.ipynb`, `Segregation.ipynb` | Decrypt + parse raw bank Excel exports into a clean workbook |
-| Merchant normalization | `ml_preprocessing/MerchantNormalization.ipynb`, `merchant_normalizer.py` | Canonicalize recipient/merchant names |
-| Statement/SMS merge | `ml_preprocessing/build_unified_dataset.py` | Backfill statement's truncated recipient names from SMS, append SMS-only transactions → `CSVS/SpendWise_Unified_Merchants.xlsx` |
+| Merchant normalization | `ml_service/app/services/merchant_normalizer.py` (notebook: `ml_preprocessing/MerchantNormalization.ipynb`) | Canonicalize recipient/merchant names |
+| Statement/SMS merge | `ml_service/app/services/build_unified_dataset.py` (notebook: `ml_preprocessing/BuildUnifiedDataset.ipynb`) | Backfill statement's truncated recipient names from SMS, append SMS-only transactions → `CSVS/SpendWise_Unified_Merchants.xlsx` |
+| Transaction categorization for model training | `ml_service/app/services/categorize_transactions.py` | Fully categorize the unified dataset (original labels + recipient lookup + heuristic classifier) → `CSVS/SpendWise_Final_Labeled.xlsx` |
 | Bank-statement pipeline (new) | {{TODO: fill in once built}} | PDF/Excel statement → clean CSV + merchant name |
 | Website/frontend | {{TODO: not yet started}} | Upload UI + analytics display |
 
@@ -170,7 +174,8 @@ See `docs/spec/security.md` for the full write-up.
 - Transaction categorization (`routes/categorize.py`) is a separate concern from merchant/recipient
   extraction — don't conflate the two deliverables.
 - Reusable parsing/cleaning logic used from more than one notebook belongs in a plain `.py` module
-  (e.g. `merchant_normalizer.py`), not copy-pasted across notebooks.
+  under `ml_service/app/services/` (e.g. `merchant_normalizer.py`), not copy-pasted across notebooks.
+  `ml_preprocessing/` holds only `.ipynb` notebooks and their `CSVS/` data artifacts.
 
 ### Infrastructure constraints
 

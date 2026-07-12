@@ -24,11 +24,12 @@ Read:
 
 - **`ml_service` changes**: pytest in `ml_service/tests/`, following `test_sms_pipeline.py`'s
   pattern — call the public function (e.g. `parse_sms_body`) with a realistic input string, assert
-  on the structured output object's fields. Don't mock internals.
-- **`ml_preprocessing` changes**: if the change touches extracted-module logic (e.g.
-  `merchant_normalizer.py`), add pytest coverage for it directly; if it's still notebook-only logic,
-  note in your output that it isn't covered by automated tests yet rather than inventing a notebook
-  test harness.
+  on the structured output object's fields. Don't mock internals. This includes extracted-module
+  logic like `merchant_normalizer.py` / `build_unified_dataset.py`, which live under
+  `ml_service/app/services/` (not `ml_preprocessing/`) precisely so they're testable.
+- **`ml_preprocessing` changes**: `.ipynb` files only (no `.py` modules live here anymore) — if it's
+  still notebook-only logic, note in your output that it isn't covered by automated tests yet rather
+  than inventing a notebook test harness.
 - Use synthetic/fixture data only — never a real personal bank statement or SMS body, even scrubbed
   (see `docs/spec/security.md`).
 

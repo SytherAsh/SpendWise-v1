@@ -33,7 +33,7 @@ reimplement — see `CLAUDE.md`'s "Relevant existing code."
 | Transaction API | `ml_service/app/routes/transaction.py`, `app/services/persistence.py` | CRUD + logic endpoints over persisted transactions |
 | Persistence | `ml_service/app/clients/supabase_client.py`, `app/schemas/transaction.py` | Supabase client + Pydantic shapes (`TransactionCreate`, `SupabaseTransaction`, `ParsedTransaction`) |
 | Offline Excel ETL (prior art) | `ml_preprocessing/CSV_PARSER.ipynb`, `Segregation.ipynb` | Decrypt + parse raw bank Excel exports into a clean workbook |
-| Merchant normalization | `ml_preprocessing/MerchantNormalization.ipynb`, `merchant_normalizer.py` | Canonicalize recipient/merchant names via UPI-ID grouping, fuzzy clustering, and a manual-review pass (`find_prefix_variants` + a curated alias dict) for the residual truncation-prefix cases neither tier can safely resolve alone |
+| Merchant normalization | `ml_service/app/services/merchant_normalizer.py` (notebook: `ml_preprocessing/MerchantNormalization.ipynb`) | Canonicalize recipient/merchant names via UPI-ID grouping, fuzzy clustering, and a manual-review pass (`find_prefix_variants` + a curated alias dict) for the residual truncation-prefix cases neither tier can safely resolve alone |
 | Bank-statement pipeline (new) | {{TODO: fill in once the module/route exists}} | PDF/Excel statement → clean CSV + merchant name, per-user upload |
 | Website/frontend | {{TODO: not yet started}} | Upload UI + analytics display |
 

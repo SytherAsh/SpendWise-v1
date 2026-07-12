@@ -173,7 +173,9 @@ transactions **already exist there**. A manual audit (2026-07-12, see
 | Remaining, no statement match at all | 168 | Genuine SMS-only |
 | **Total** | **1,078** | **909 duplicates / 169 genuinely SMS-only** |
 
-**This merge is now built**: `ml_preprocessing/build_unified_dataset.py` produces
+**This merge is now built**: `ml_service/app/services/build_unified_dataset.py` (run with
+`python -m app.services.build_unified_dataset` from `ml_service/`; reference notebook:
+`ml_preprocessing/BuildUnifiedDataset.ipynb`) produces
 `ml_preprocessing/CSVS/SpendWise_Unified_Merchants.xlsx` — the bank statement as the base (1,917 rows),
 with recipient names backfilled from the fuller SMS name wherever unambiguously matched (821 rows), and
 the 169 genuinely SMS-only transactions appended as new rows — 2,086 rows total, deduped, one source of
@@ -183,7 +185,7 @@ same-day/same-amount Airtel pairs are confirmed real duplicates but not safely 1
 reference id, so their statement names are intentionally left untouched rather than risk a wrong
 pairing. Re-run the script whenever `captured_sms.csv` gets new data.
 
-### Recipient canonicalization (`ml_preprocessing/merchant_normalizer.py`)
+### Recipient canonicalization (`ml_service/app/services/merchant_normalizer.py`)
 
 After the merge, `Recipient_Canonical` is recomputed from scratch over the whole unified dataset (UPI-ID
 grouping + fuzzy name clustering, pre-existing tooling) plus two additions from 2026-07-12:
@@ -226,8 +228,35 @@ breaks that match. Low-impact (a handful of rows); not yet fixed.
   is simply unverified until other banks' SMS appear in the data.
 - **No supervised model yet** — classification is entirely rule-based. Layering a model over the
   `UNKNOWN` bucket needs the labeled sample above first.
-- **Unified dataset needs categorization labels.** `SpendWise_Unified_Merchants.xlsx` has clean,
-  backfilled recipient names but no `category` column — the existing `SpendWise_4yrs_Labelled.xlsx`
-  (1,810 rows) is a separate, older labeling pass that needs re-linking to this dataset and has its own
-  quality issue (its `Transfers` category is a catch-all: ~50% of all labels, mixing genuine
-  person-to-person transfers with mislabeled real spending).
+- **Heuristic-labeled rows haven't had human review.** The 408 rows categorized by
+  `categorize_transactions.py`'s tier-2/3 logic (see below) are a best-effort default, not a
+  human-confirmed label — worth a spot-check pass before treating them as equally reliable to the
+  1,678 rows carried over from the original manual labeling.
+
+## Full categorization pipeline (`ml_service/app/services/categorize_transactions.py`)
+
+Produces the final, fully-categorized training CSV from the unified dataset (2,086 rows) plus the
+existing manually-labeled file (1,810 rows) — run with `python -m app.services.categorize_transactions`
+from `ml_service/`. Output: `ml_preprocessing/CSVS/SpendWise_Final_Labeled.xlsx` (2,086 rows, every
+row categorized, `category` column never null) plus `CSVS/final_labeling_audit.xlsx` (every non-
+original-label decision with its reason, for review).
+
+The unified dataset is bigger than the labeled file — 239 statement rows were never labeled at all,
+plus the 169 SMS-only rows are new — so every row gets a category via one of three tiers, in order:
+
+1. **`original_label`** (1,678 rows) — an existing human label, carried over by reference id.
+2. **`recipient_lookup`** (151 rows) — no label for this specific transaction, but the same
+   `Recipient_Canonical` was already labeled elsewhere (majority vote per recipient).
+3. **`heuristic`** (257 rows) — no existing label anywhere for this recipient. Classified by known
+   family/friend name, business keyword/brand match, or — as a last resort, matching this dataset's
+   own base rate (roughly half of a personal UPI history is genuinely P2P) — defaulted to
+   `Transfers`/`person`. Only a name with no signal at all falls to `Miscellaneous` (133 rows total,
+   6.4% of the dataset — mostly genuine sentinels like `ATM_WITHDRAWAL`/`INTEREST_CREDIT` and generic
+   payment-gateway tags, not real merchants the classifier failed to recognize).
+
+The tier-3 heuristic classifier went through several rounds of real bug fixes during development —
+each documented inline in `categorize_transactions.py` next to the check that catches it: a keyword
+collision (`CHANA`/`HOSPITAL` matching inside `ARCHANA`/`HOSPITALITY`), ATM withdrawal codes and income
+credits (`STIPEND NOMURA`) having the same surface shape as a person's name and needing explicit
+exclusion before the person-shape default, and the same stray-space extraction artifact fixed earlier
+in `sms_parser.py` recurring in recipient text (`"Bil l Pay"`, `"Loa n Rep"`, `"F amily"`).
