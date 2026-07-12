@@ -83,8 +83,13 @@ authoritative for this task.
 ## Repo layout
 
 - `ml_preprocessing/` — Jupyter notebooks for offline ETL/EDA
-  (`Segregation.ipynb`, `EDA.ipynb`, `Analyse.ipynb`, `Raw_SmS.ipynb`,
-  `Stats.ipynb`) and their CSV/Excel artifacts under `CSVS/`.
+  (`Segregation.ipynb`, `EDA.ipynb`, `Analyse.ipynb`, `CSV_PARSER.ipynb`,
+  `MerchantNormalization.ipynb`) and their CSV/Excel artifacts under `CSVS/`.
+  `SMS_Pipeline.ipynb` is a cell-by-cell reference walkthrough of the live
+  `ml_service/app/services/sms_pipeline.py` — it imports and runs the real
+  pipeline code rather than reimplementing it, so it can't drift out of sync.
+  `Raw_SmS.ipynb` is earlier exploratory work that predates the current
+  SMS-pipeline architecture; kept for history, not authoritative.
 - `ml_service/` — FastAPI Python service: SMS ingestion, Excel bulk-load,
   rule-based categorization, Supabase persistence. This is where the new
   statement-upload pipeline will likely live (new route + module), unless

@@ -63,11 +63,16 @@ the whole thing is re-runnable over the raw file at any time.
    label + confidence and, for financial rows, extracts amount, direction, bank, mode, recipient,
    UPI ID, ref ID, balance. One pass, not two.
 3. *(extraction is part of stage 2 — same parser call)*
-4. **Transaction dedup** (`dedup_transactions`) — among financial rows, collapse cross-channel
-   duplicates on `(amount, direction, 2-minute bucket)`, keeping the row with a ref_id, then higher
-   confidence (i.e. prefer the authoritative bank SMS over an app-notification twin). The window is
-   tight **on purpose**: the same amount recurring on a different day (e.g. a monthly recharge) is a
-   distinct transaction and must not be merged — a same-day key would wrongly collapse those.
+4. **Transaction dedup** (`dedup_transactions`) — two passes. **Pass 1** collapses rows sharing a
+   non-null **`ref_id`** (authoritative: the same SBI SMS re-delivered via different telco gateways
+   minutes/hours apart; different refs stay distinct — SBI assigns a fresh reference per payment).
+   **Pass 2** clusters adjacent `(amount, direction)` rows within a window and asks how many distinct
+   transactions the cluster holds: `max(distinct target-phones, distinct ref_ids, 1)`. This is what
+   lets one telecom recharge (bank debit + 2-3 operator confirmations, one target phone) collapse to
+   **one** row, while two family numbers recharged for the same amount minutes apart (two phones) stay
+   **two** — and two separate same-amount UPI payments (two refs) stay two. The survivor is the bank
+   SMS (ref-bearing, higher confidence). Adjacency, not a fixed clock bucket, is deliberate:
+   floor-bucketing split genuine twins straddling a boundary (e.g. 19s apart across :50/:52).
 5. **Validate** (`validate`) — measures quality without mutating: extraction-rate per field,
    direction split, `amount == balance` suspect count, amount total/max. A rate table alone hides the
    defects that matter (see below), so this exists to surface them.
@@ -95,6 +100,34 @@ Rs500… once approved", which are conditional, not completed).
 `_extract_transaction_amount` now uses `BALANCE_PATTERN` to pinpoint the balance figure and excludes
 that exact number from amount candidates.
 
+**Payment-confirmation recovery** (added 2026-07-12, from a manual-review pass): real outgoing
+payments that don't use "debited" wording were being dropped — telecom recharges ("Recharge of INR 319
+is successful", "we have processed Rs 299 for your Airtel Mobile"), internet-banking transfers ("INB
+txn of Rs 102.12 to IRCTC"), and booking payments. `PAYMENT_CONFIRMATION_PATTERN` recovers them as
+**DEBIT** transactions (runs before the promo gate so Airtel confirmations aren't lost to it). Two
+guards: mandate/autopay *setup* SMS ("UPI-Mandate for Rs.29 created") are excluded — no money moves at
+creation; and for telecom confirmations the per-SMS "Order Id"/"Transaction ID" is **not** stored as a
+`ref_id` (it isn't a bank reference, and keeping it would stop the 2-3 SMS of one recharge from
+deduping). The pipeline's Pass-2 identity rule (above) then collapses those multi-SMS recharges.
+
+**Recipient extraction — "you" bug** (fixed 2026-07-12, from a manual-review pass): an SBI IMPS-credit
+format puts the payer's name at the end ("...credited by Rs.1500 ... by a/c linked to mobile
+9XXXXXX567-SAMEER BALIRAM SAWA (IMPS Ref no ...)"), but the generic "by NAME" credit pattern backtracked
+past it onto the safety boilerplate ("If not done by **you**, call...") and returned "you" as the
+recipient — silently wrong on 63 rows. Fixed with a dedicated pattern for this format (highest
+priority in `RECIPIENT_CREDIT_PATTERNS`) plus a `RECIPIENT_JUNK` guard so boilerplate words ("you",
+"the", "call", ...) can never be returned as a recipient — the extractor falls through to the next
+pattern instead.
+
+## Reference notebook: `ml_preprocessing/SMS_Pipeline.ipynb`
+
+A cell-by-cell walkthrough of this pipeline for interactive inspection. It **imports and runs the real
+`sms_pipeline.py` / `sms_parser.py` code** rather than reimplementing any logic, so it can't drift out
+of sync — several cells print function source (`inspect.getsource`) so the regex/classification logic
+is readable inline without switching files. Also includes the SMS-vs-bank-statement cross-check (see
+below). Not to be confused with `Raw_SmS.ipynb`, which is earlier exploratory work that predates this
+architecture.
+
 ## Persistence: `app/services/persistence.py`
 
 `persist_sms_transaction()` resolves/creates an account and recipient, runs a DB-level dedup
@@ -119,9 +152,31 @@ its printed summary for a current snapshot.
 ## Validation against ground truth
 
 The extracted amounts were cross-checked against the independently-produced bank workbook
-(`ml_preprocessing/CSVS/SpendWise_4yrs_Clean_Merchants.xlsx`) by reference ID: on the 837 transactions
-present in both, **every amount matched exactly**. This is the strongest available correctness signal
-and specifically validates the amount-vs-balance fix. Re-run it whenever the parser changes materially.
+(`ml_preprocessing/CSVS/SpendWise_4yrs_Clean_Merchants.xlsx`) by reference ID: on the ~840 transactions
+present in both, **every amount matched exactly** (0 mismatches). This is the strongest available
+correctness signal and specifically validates the amount-vs-balance fix. Re-run it whenever the parser
+changes materially.
+
+## SMS vs. bank-statement overlap (important before merging sources)
+
+The SMS pipeline only dedupes SMS-against-SMS — it has no knowledge of the bank statement, and most SMS
+transactions **already exist there**. A manual audit (2026-07-12, see
+`ml_service/data/manual_review_error_found.xlsx`, `tru_financial_deplicate.xlsx`,
+`ambiguous_matches_review.xlsx`) reconciled all 1,078 SMS financial transactions against the workbook:
+
+| Category | Count | Resolution |
+| --- | --- | --- |
+| Exact `ref_id` match | 846 | Confirmed duplicate |
+| Date + amount + direction match (ref differed/missing — e.g. bank-fee/insurance auto-debits never carry a ref on either side) | 54 | Confirmed duplicate |
+| Ambiguous (multiple statement candidates same day/amount/direction), resolved by reading recipient text or raw SMS | 9 | 3 confirmed duplicate; 6 confirmed **not** ambiguous — both SMS rows already correctly 1:1-match both statement rows (two family phones recharged the same amount minutes apart) |
+| Confirmed via manual review as a genuinely different payment instrument (money moved to a linked wallet app, e.g. slice) | 1 | Genuine SMS-only |
+| Remaining, no statement match at all | 168 | Genuine SMS-only |
+| **Total** | **1,078** | **909 duplicates / 169 genuinely SMS-only** |
+
+**Implication: don't feed `true_financial_sms.csv` into the same store as the bank-statement pipeline's
+output without a merge/dedup step first** — doing so as-is would double-count 909 of 1,078 transactions.
+That merge (dedupe the 909, keep the 169 as net-new, optionally backfill the statement's truncated
+recipient names from the fuller SMS names for the 846+54 overlapping rows) is not yet built.
 
 ## Known gaps / open questions
 
@@ -129,11 +184,17 @@ and specifically validates the amount-vs-balance fix. Re-run it whenever the par
   broken, but because most of a real inbox is promo/OTP/alert noise. A hand-labeling pass over
   `review_queue_sms.csv` is the highest-leverage next step: it both fixes any residual regex misses
   and produces the labeled set a supervised classifier would need.
-- **Credit-side recipient is often blank** (~40% of credits). This is a data limitation, not a parser
-  bug — the SBI credit format literally omits the payer name (`credited by Rs4 … by  (Ref no …)`).
+- **Credit-side recipient is often blank** for one specific SBI format (`credited by Rs4 … by  (Ref no
+  …)`) that omits the payer name entirely — a data limitation, not a parser bug. A different SBI IMPS
+  format that does carry the name at the end (`... by a/c linked to mobile 9XXXXXX567-NAME (IMPS Ref
+  no ...)`) was previously mis-extracted as "you" (boilerplate leakage) and is now fixed — see
+  "Recipient extraction — 'you' bug" above.
 - **UPI-ID extraction is ~2%.** Expected: SBI transaction SMS identify the counterparty by name/ref,
   not by VPA.
 - **Single bank / account today** (SBI, one account). The parser is bank-general; multi-bank behavior
   is simply unverified until other banks' SMS appear in the data.
 - **No supervised model yet** — classification is entirely rule-based. Layering a model over the
   `UNKNOWN` bucket needs the labeled sample above first.
+- **No merge against the bank statement yet** — see "SMS vs. bank-statement overlap" above. 909 of the
+  1,078 current financial rows are duplicates of statement transactions; a merge/dedup step is needed
+  before combining both sources into one store.

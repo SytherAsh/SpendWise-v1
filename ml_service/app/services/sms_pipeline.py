@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Optional
 
 import numpy as np
@@ -22,8 +23,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Anchor all data paths to ml_service/ (this file lives in ml_service/app/).
-_ML_SERVICE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Anchor all data paths to ml_service/ (this file lives in ml_service/app/services/).
+# Walk up from app/services/ -> app/ -> ml_service/.
+_ML_SERVICE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _data_path(name: str) -> str:
@@ -42,10 +44,15 @@ IST = "Asia/Kolkata"
 # queue rather than being trusted outright.
 REVIEW_CONFIDENCE_THRESHOLD = 0.75
 
-# Cross-channel dedup window: an SMS and its app-notification twin arrive within a
-# minute or two. Two genuine same-amount payments are essentially never this close,
-# so a tight window collapses duplicates without merging distinct transactions.
-DEDUP_WINDOW = "2min"
+# Cross-channel dedup window. The several SMS of one payment (bank debit + app/operator
+# confirmations; a telecom recharge fires 2-4) land within a few minutes, so the window
+# must cover that spread. It is safe to keep wide because the Pass-2 identity rule — not
+# the window alone — is what separates distinct transactions (by target phone / ref_id).
+TELECOM_WINDOW = "10min"
+
+# SBI's own fraud-helpline number appears in every SBI SMS ("fwd to 9223008333") — it
+# is never the recharge target, so it must be excluded from phone extraction.
+_SBI_HELPLINE = "9223008333"
 
 # Final output column order for the clean financial CSV.
 FINANCIAL_COLUMNS = [
@@ -178,36 +185,90 @@ class SmsPipeline:
     # ------------------------------------------------------------------
 
     def dedup_transactions(self, financial: pd.DataFrame) -> pd.DataFrame:
-        """Collapse cross-channel duplicates among financial rows.
+        """Collapse duplicates among financial rows, in two passes.
 
-        The same payment can arrive as a bank SMS and an app notification with
-        different text but the same amount, direction, and near-identical time.
-        We group on (amount, direction, 2-minute bucket) and keep ONE row per group,
-        preferring the bank SMS: the row that has a ref_id, then higher confidence.
+        Pass 1 — ref_id (authoritative). Two rows with the same non-null ref_id are
+        the SAME transaction, no matter the time gap or telco gateway. Different
+        ref_ids are DISTINCT transactions — SBI assigns a fresh reference per payment.
 
-        Uses a tight time window (not same calendar day) on purpose — the same
-        amount recurring on different days (e.g. a monthly recharge) is a genuinely
-        distinct transaction and must not be merged.
+        Pass 2 — time-window clusters with an identity rule. The same payment can
+        surface as several SMS within minutes: a bank debit plus operator/app
+        confirmations (a telecom recharge fires 2-4). We cluster adjacent
+        same-(amount, direction) rows within a window, then decide how many DISTINCT
+        transactions the cluster holds as `max(distinct target-phones, distinct
+        ref_ids, 1)`:
+
+          * one recharge = one phone + maybe one bank ref  -> collapses to 1 row;
+          * two family numbers recharged for the same amount minutes apart = two
+            phones -> stays 2 rows;
+          * two separate UPI payments of the same amount = two refs -> stays 2 rows.
+
+        Adjacency (not a fixed clock bucket) is deliberate — floor-bucketing split
+        genuine twins that straddled a boundary (e.g. 19s apart across :50/:52).
+        The bank SMS (ref-bearing, higher confidence) is preferred as the survivor.
         """
         if financial.empty:
             return financial
 
         df = financial.copy()
-        df["_bucket"] = df["event_time"].dt.floor(DEDUP_WINDOW)
-        # Rank within each duplicate group: has-ref first, then confidence, then earliest.
         df["_has_ref"] = df["ref_id"].notna().astype(int)
-        df = df.sort_values(
-            ["amount", "direction", "_bucket", "_has_ref", "classification_confidence", "event_time"],
-            ascending=[True, True, True, False, False, True],
-        )
         n_before = len(df)
-        df = df.drop_duplicates(subset=["amount", "direction", "_bucket"], keep="first")
-        n_removed = n_before - len(df)
 
-        df = df.drop(columns=["_bucket", "_has_ref"]).sort_values("event_time").reset_index(drop=True)
-        logger.info("Stage 4 done | financial_in=%d cross_channel_removed=%d out=%d",
-                    n_before, n_removed, len(df))
+        # Pass 1: collapse rows sharing a non-null ref_id, keeping the best copy.
+        ref_rows = df[df["ref_id"].notna()].sort_values(
+            ["_has_ref", "classification_confidence", "event_time"], ascending=[False, False, True]
+        )
+        ref_rows = ref_rows.drop_duplicates(subset=["ref_id"], keep="first")
+        df = pd.concat([ref_rows, df[df["ref_id"].isna()]], ignore_index=True)
+        n_after_ref = len(df)
+
+        # Pass 2: window-cluster and collapse by the identity rule.
+        df["_phone"] = df["body"].map(self._telecom_phone)
+        df = df.sort_values(["amount", "direction", "event_time"]).reset_index(drop=True)
+        same = df["amount"].eq(df["amount"].shift()) & df["direction"].eq(df["direction"].shift())
+        within = df["event_time"].diff() <= pd.Timedelta(TELECOM_WINDOW)
+        df["_cluster"] = (~(same & within)).cumsum()
+
+        kept = []
+        for _, cluster in df.groupby("_cluster", sort=False):
+            phones = cluster["_phone"].dropna().unique()
+            refs = cluster["ref_id"].dropna().unique()
+            if len(phones) >= 2:
+                # Multiple recharges (distinct target numbers) — one row per phone.
+                for _, grp in cluster[cluster["_phone"].notna()].groupby("_phone"):
+                    kept.append(self._best_row(grp))
+            elif len(refs) >= 2:
+                # Distinct bank references — genuinely separate transactions.
+                for _, grp in cluster[cluster["ref_id"].notna()].groupby("ref_id"):
+                    kept.append(self._best_row(grp))
+            else:
+                # One transaction (<=1 phone and <=1 ref) — collapse to the best row.
+                kept.append(self._best_row(cluster))
+
+        df = pd.DataFrame(kept).drop(columns=["_has_ref", "_phone", "_cluster"])
+        df = df.sort_values("event_time").reset_index(drop=True)
+        logger.info(
+            "Stage 4 done | financial_in=%d after_ref_dedup=%d out=%d",
+            n_before, n_after_ref, len(df),
+        )
         return df
+
+    @staticmethod
+    def _telecom_phone(body: str) -> Optional[str]:
+        """The recharge target mobile number, if the SMS names one (excludes the helpline)."""
+        for m in re.findall(r"\b(9\d{9})\b", str(body)):
+            if m != _SBI_HELPLINE:
+                return m
+        return None
+
+    @staticmethod
+    def _best_row(group: pd.DataFrame) -> pd.Series:
+        """Pick the most authoritative row in a duplicate group: ref-bearing, then higher
+        confidence, then earliest."""
+        return group.sort_values(
+            ["_has_ref", "classification_confidence", "event_time"],
+            ascending=[False, False, True],
+        ).iloc[0]
 
     # ------------------------------------------------------------------
     # Review queue — low-confidence / UNKNOWN rows for manual labeling

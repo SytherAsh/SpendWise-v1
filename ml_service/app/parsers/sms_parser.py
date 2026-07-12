@@ -164,12 +164,24 @@ RECIPIENT_DEBIT_PATTERNS = [
 ]
 
 RECIPIENT_CREDIT_PATTERNS = [
+    # SBI IMPS credit: "...by a/c linked to mobile 9XXXXXX567-SAMEER BALIRAM SAWA (IMPS Ref no ...".
+    # The payer name sits between the masked mobile (ending in '-') and the parenthesised ref.
+    # Highest priority: the generic "by NAME" pattern otherwise backtracks onto the safety
+    # line "If not done by you, call ..." and returns "you".
     re.compile(
-        r"(?:transfer(?:red)?\s+from|received\s+from|from|by\s+a/c\s+linked\s+to\s+(?:mobile\s+[0-9Xx]+\s*-?\s*)?|\bby)\s+"
+        r"linked\s+to\s+mobile\s+[0-9Xx]+\s*-\s*([A-Za-z][A-Za-z .]{1,35}?)\s*(?:\(|$)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:transfer(?:red)?\s+from|received\s+from|from|\bby)\s+"
         r"(?!\s*(?:Rs\.?|INR|₹))([A-Za-z][A-Za-z0-9 &'._-]{1,35})",
         re.IGNORECASE,
     ),
 ]
+
+# Never a real counterparty — these come from safety boilerplate ("If not done by you")
+# or partial matches on structural words.
+RECIPIENT_JUNK = {"you", "u", "your", "a", "a/c", "ac", "the", "call", "block", "upi"}
 
 # Words that terminate a recipient name
 RECIPIENT_TERMINATORS = re.compile(
@@ -217,6 +229,36 @@ GAMBLING_PATTERN = re.compile(
 COLLECT_REQUEST_PATTERN = re.compile(
     r"(?:has\s+requested|requested\s+(?:money|rs\.?|inr|₹)|requested\s+money\s+(?:from|on)"
     r"|collect\s+request|(?:on|once)\s+approv(?:ing|ed)|will\s+be\s+debited\s+from\s+your)",
+    re.IGNORECASE,
+)
+
+# Genuine completed OUTGOING payments that don't use "debited" wording — telecom
+# recharges, internet-banking transfers, booking payments. These are real spending
+# and were being dropped as promo/unknown; recover them as DEBIT transactions.
+PAYMENT_CONFIRMATION_PATTERN = re.compile(
+    r"(?:recharge of (?:inr|rs)[\d.,\s]+is success"
+    r"|recharge of rs[\d.,\s]+successfully credited"
+    r"|prepaid recharge of rs[\d.,\s]+is success"
+    r"|we have processed rs[\d.,\s]+for your"
+    r"|\bINB txn of rs"
+    r"|thank you for the payment of rs)",
+    re.IGNORECASE,
+)
+
+# Telecom recharge confirmation — used to force DEBIT direction, set the recipient to
+# the operator, and SUPPRESS ref extraction (the "Order Id"/"Transaction ID" in these
+# is a per-SMS telecom id, not a bank reference; keeping it would make the 2-3 SMS of
+# one recharge look like distinct transactions and defeat dedup).
+TELECOM_CONFIRMATION_PATTERN = re.compile(
+    r"(?:for your airtel mobile|to your airtel|airtel prepaid|prepaid recharge of"
+    r"|recharge of (?:inr|rs)[\d.,\s]+is success)",
+    re.IGNORECASE,
+)
+
+# Autopay/mandate SETUP — no money moves at creation; the real recurring debit arrives
+# later as its own SMS. Excluded (unless the message is itself a debit).
+MANDATE_SETUP_PATTERN = re.compile(
+    r"(?:UPI[-\s]?Mandate for|e-?mandate\b|mandate .{0,25}(?:created|set\s?up)|autopay .{0,25}(?:created|set\s?up))",
     re.IGNORECASE,
 )
 
@@ -456,6 +498,17 @@ def _classify_sms(body: Optional[str], sender: Optional[str] = None) -> tuple[st
     if COLLECT_REQUEST_PATTERN.search(text):
         return "UNKNOWN", 0.20, "Collect/request-money (conditional, not a completed transaction)"
 
+    # Mandate/autopay SETUP — not a payment (no money moved). Exclude, unless the
+    # message is itself an actual debit (a real recurring charge mentioning "mandate").
+    if MANDATE_SETUP_PATTERN.search(text) and not re.search(r"\bdebited\b", lower):
+        return "UNKNOWN", 0.30, "Mandate/autopay setup (no money moved yet)"
+
+    # Completed payment/recharge confirmations that lack "debited" wording — recover
+    # these as real DEBIT transactions (they were previously dropped as promo/unknown).
+    # Runs BEFORE the promo gate so Airtel recharge confirmations aren't lost to it.
+    if PAYMENT_CONFIRMATION_PATTERN.search(text) and _extract_transaction_amount(text, "DEBIT") is not None:
+        return "FINANCIAL_TRANSACTION", 0.90, "Completed payment/recharge confirmation"
+
     # If promotional cues are strong (cashback, win, use code, offer)
     # prefer PROMOTIONAL even when an amount appears — these are marketing
     # messages that mention amounts, not real transactions.
@@ -601,7 +654,7 @@ def _extract_recipient(body: str, direction: Optional[str]) -> Optional[str]:
         if match:
             # Group 1 is the name
             name = match.group(1).strip()
-            
+
             # Apply terminators to cut off trailing garbage
             term_match = RECIPIENT_TERMINATORS.search(name)
             if term_match:
@@ -609,6 +662,11 @@ def _extract_recipient(body: str, direction: Optional[str]) -> Optional[str]:
 
             # Clean trailing punctuation
             name = re.sub(r"[-_.,]+$", "", name).strip()
+
+            # Reject boilerplate/junk matches (e.g. "you" from "if not done by you")
+            # and fall through to the next pattern instead of returning garbage.
+            if not name or name.lower() in RECIPIENT_JUNK:
+                continue
             return _clean_entity_name(name)
 
     return None
@@ -695,7 +753,11 @@ def parse_sms_body(body: Optional[str], sender: Optional[str] = None) -> ParsedT
 
     # --- Direction ---
     body_lower = text.lower()
-    if "credited" in body_lower:
+    # Telecom recharge confirmations say the phone balance was "credited" — but from
+    # the user's bank side that is money OUT. Force DEBIT before the "credited" check.
+    if TELECOM_CONFIRMATION_PATTERN.search(text) and "debited" not in body_lower:
+        result.direction = "DEBIT"
+    elif "credited" in body_lower:
         result.direction = "CREDIT"
     elif "debited" in body_lower:
         result.direction = "DEBIT"
@@ -703,6 +765,9 @@ def parse_sms_body(body: Optional[str], sender: Optional[str] = None) -> ParsedT
         result.direction = "DEBIT"
     elif CREDIT_KEYWORDS.search(text):
         result.direction = "CREDIT"
+    elif PAYMENT_CONFIRMATION_PATTERN.search(text):
+        # INB/booking confirmations are money going OUT.
+        result.direction = "DEBIT"
 
     # Sanity: if no amount or no direction, demote to UNKNOWN for downstream review.
     if result.amount is None or result.direction is None:
@@ -728,14 +793,23 @@ def parse_sms_body(body: Optional[str], sender: Optional[str] = None) -> ParsedT
     result.balance_after = _extract_balance(text)
 
     # --- Reference ID ---
-    result.ref_id = _extract_ref_id(text)
+    # For pure telecom recharge confirmations, the "Order Id"/"Transaction ID" is a
+    # per-SMS telecom id, not a bank reference — suppress it so the 2-3 SMS of one
+    # recharge stay dedupable (the pipeline collapses them by amount + target phone).
+    is_telecom_confirmation = (
+        TELECOM_CONFIRMATION_PATTERN.search(text) and "debited" not in body_lower
+    )
+    result.ref_id = None if is_telecom_confirmation else _extract_ref_id(text)
 
     # --- Recipient ---
-    result.recipient_name = _extract_recipient(text, result.direction)
-    if not result.recipient_name:
-        result.recipient_name = _fallback_merchant_extraction(text, sender or "", result.bank)
-    if not result.recipient_name:
-        result.recipient_name = _fallback_account_recipient(text, result.account_suffix)
+    if is_telecom_confirmation:
+        result.recipient_name = "Airtel"
+    else:
+        result.recipient_name = _extract_recipient(text, result.direction)
+        if not result.recipient_name:
+            result.recipient_name = _fallback_merchant_extraction(text, sender or "", result.bank)
+        if not result.recipient_name:
+            result.recipient_name = _fallback_account_recipient(text, result.account_suffix)
 
     result.recipient_name = _clean_entity_name(result.recipient_name)
 
