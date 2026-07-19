@@ -23,10 +23,17 @@
 
 ## Auth model
 
-{{TODO: not yet decided. The current SMS-ingestion and Excel bulk-load endpoints have no
-authentication — fine for a solo/local-only deployment, but must be addressed before the website
-upload flow goes live with real per-user data. Decide and record: session/token model, whether
-`ACCOUNT_ID` generalizes to a real multi-user identity, row-level security in Supabase.}}
+Real per-user auth is not yet built (the website itself doesn't exist yet). Per ADR-0003, the
+statement-upload endpoint (`POST /api/statements/upload`) takes `user_id` as a required request
+field as an interim stopgap — this trusts the caller and provides no actual access control, but it
+means `accounts`/`recipients`/`transactions` are already user-scoped in the schema (see
+`docs/spec/database.md`) so real auth can be swapped in later (session/token model, row-level
+security in Supabase) without a schema migration. This stopgap must not be exposed beyond a trusted
+local frontend — treat it as a placeholder, not a security boundary.
+
+{{TODO: still open — session/token model, whether `ACCOUNT_ID` generalizes to a real multi-user
+identity, row-level security in Supabase. Must be resolved before the website goes live with real
+per-user data beyond the account holder's own testing.}}
 
 ## Compliance
 
