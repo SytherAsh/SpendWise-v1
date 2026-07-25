@@ -6,6 +6,7 @@ from app.routes.bulk import router as bulk_router
 from app.routes.transaction import router as transactions_router
 from app.routes.categorize import router as categorize_router
 from app.routes.ingest import router as ingest_router
+from app.routes.statementUpload import router as statement_upload_router
 
 # Configure logging so all modules output to console
 logging.basicConfig(
@@ -38,6 +39,7 @@ def health():
 app.include_router(bulk_router, tags=["bulk"])
 app.include_router(transactions_router, tags=["transactions"])
 app.include_router(categorize_router, tags=["categorization"])
+app.include_router(statement_upload_router, tags=["statements"])
 
 # New router for Android app notification/SMS ingest
 app.include_router(ingest_router, tags=["ingest"])

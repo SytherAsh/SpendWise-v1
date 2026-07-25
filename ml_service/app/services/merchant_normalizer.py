@@ -361,3 +361,38 @@ def merge_prefix_chains(names, min_len: int = 6) -> dict:
             targets = [mx for mx in maximal if _chains(m, mx)]
             mapping[m] = targets[0] if len(targets) == 1 else m
     return mapping
+
+
+def merge_whitespace_variants(names) -> dict:
+    """Merge canonical names that are identical once internal whitespace is
+    removed -- e.g. "W IFE" / "WI FE" / "WIFE" are all the same label, just
+    typed (or line-wrapped by the bank's export) with the space landing in a
+    different spot each time. `cluster_by_fuzzy_name`'s token_sort_ratio
+    doesn't reliably catch this: inserting one space into a short 4-8 letter
+    word is a large relative edit, so two variants can easily land below any
+    reasonable similarity threshold despite being the exact same word.
+
+    Exact-match-after-stripping-whitespace is a much higher-confidence merge
+    than fuzzy similarity, though, so it's handled as its own tier rather than
+    by loosening the fuzzy threshold: for two DIFFERENT real names to collide
+    here they'd need the exact same letters in the exact same order once
+    spaces are removed, which essentially never happens by coincidence for
+    real names -- there's no threshold to tune and no near-miss false-merge
+    risk the way there is with fuzzy clustering.
+
+    Returns {name: canonical_name} for every name passed in (unmerged names
+    map to themselves); canonical = most frequent variant, ties broken by
+    fewest internal spaces (prefers the fully-joined spelling).
+    """
+    counts = Counter(names)
+    groups: dict = {}
+    for name in dict.fromkeys(names):
+        key = _WHITESPACE_RE.sub("", name)
+        groups.setdefault(key, []).append(name)
+
+    mapping = {}
+    for members in groups.values():
+        canonical = max(members, key=lambda nm: (counts[nm], -nm.count(" ")))
+        for name in members:
+            mapping[name] = canonical
+    return mapping

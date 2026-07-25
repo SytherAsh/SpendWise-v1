@@ -1,0 +1,138 @@
+<!doctype html>
+<!--
+Manual browser test page for POST /statements/upload.
+
+Not part of the application -- Swagger's /docs page renders the multi-file
+"files" field as a plain text array instead of a file picker (a schema-
+generation quirk with List[UploadFile] in this FastAPI/Pydantic version;
+confirmed the generated OpenAPI schema uses "contentMediaType" instead of
+the older "format: binary" that Swagger UI's array-item renderer expects).
+This page just does the same multipart/form-data POST by hand with a real
+<input type="file" multiple> control, so it isn't affected by that bug.
+
+Usage: start the server (`python -m uvicorn app.main:app --port 8000` from
+ml_service/), then open this file directly in a browser (double-click it,
+or File > Open). No server-side route serves this file.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SpendWise -- Statement Upload Test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin-top: 1rem; font-weight: 600; }
+  input[type=text], input[type=password], input[type=url] { width: 100%; padding: 0.4rem; box-sizing: border-box; }
+  button { margin-top: 1.5rem; padding: 0.6rem 1.2rem; font-size: 1rem; cursor: pointer; }
+  pre { background: #f3f3f3; padding: 1rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  .status { font-weight: 600; margin-top: 1rem; }
+  .status.ok { color: #1a7f37; }
+  .status.err { color: #cf222e; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: 0.85rem; }
+  th, td { border: 1px solid #ddd; padding: 0.3rem 0.5rem; text-align: left; }
+  th { background: #f3f3f3; }
+</style>
+</head>
+<body>
+<h1>Statement Upload -- Manual Test</h1>
+
+<label for="serverUrl">Server URL</label>
+<input type="url" id="serverUrl" value="http://127.0.0.1:8000">
+
+<label for="fileInput">Statement file(s) (.csv, .xls, .xlsx, .xlsm, .xlsb -- select multiple with Ctrl/Cmd-click)</label>
+<input type="file" id="fileInput" multiple accept=".csv,.xls,.xlsx,.xlsm,.xlsb">
+
+<label for="passwordInput">Password (only if the workbook is protected)</label>
+<input type="password" id="passwordInput" placeholder="leave blank if not protected">
+
+<label><input type="checkbox" id="downloadCheckbox" style="width:auto;display:inline;margin-right:0.4rem;">Download the cleaned CSV instead of showing JSON</label>
+
+<button id="submitBtn">Upload</button>
+
+<div id="status" class="status"></div>
+<div id="result"></div>
+
+<script>
+document.getElementById('submitBtn').addEventListener('click', async () => {
+  const serverUrl = document.getElementById('serverUrl').value.replace(/\/$/, '');
+  const files = document.getElementById('fileInput').files;
+  const password = document.getElementById('passwordInput').value;
+  const download = document.getElementById('downloadCheckbox').checked;
+  const statusEl = document.getElementById('status');
+  const resultEl = document.getElementById('result');
+  statusEl.textContent = '';
+  statusEl.className = 'status';
+  resultEl.innerHTML = '';
+
+  if (!files.length) {
+    statusEl.textContent = 'Pick at least one file first.';
+    statusEl.className = 'status err';
+    return;
+  }
+
+  const formData = new FormData();
+  for (const f of files) formData.append('files', f);
+  if (password) formData.append('password', password);
+
+  const url = `${serverUrl}/statements/upload${download ? '?download=true' : ''}`;
+  statusEl.textContent = 'Uploading...';
+
+  try {
+    const response = await fetch(url, { method: 'POST', body: formData });
+
+    if (download) {
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ detail: response.statusText }));
+        statusEl.textContent = `HTTP ${response.status}: ${err.detail || 'request failed'}`;
+        statusEl.className = 'status err';
+        return;
+      }
+      const blob = await response.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'cleaned_statement.csv';
+      a.click();
+      statusEl.textContent = 'Downloaded.';
+      statusEl.className = 'status ok';
+      return;
+    }
+
+    const data = await response.json();
+    if (!response.ok) {
+      statusEl.textContent = `HTTP ${response.status}: ${data.detail || 'request failed'}`;
+      statusEl.className = 'status err';
+      return;
+    }
+
+    statusEl.textContent = `OK -- ${data.rows_processed} rows processed. Saved to: ${data.processed_file}`;
+    statusEl.className = 'status ok';
+
+    const meta = document.createElement('pre');
+    meta.textContent = 'account_metadata: ' + JSON.stringify(data.account_metadata, null, 2);
+    resultEl.appendChild(meta);
+
+    if (data.transactions && data.transactions.length) {
+      const cols = Object.keys(data.transactions[0]);
+      const table = document.createElement('table');
+      const thead = document.createElement('tr');
+      cols.forEach(c => { const th = document.createElement('th'); th.textContent = c; thead.appendChild(th); });
+      table.appendChild(thead);
+      data.transactions.slice(0, 50).forEach(row => {
+        const tr = document.createElement('tr');
+        cols.forEach(c => { const td = document.createElement('td'); td.textContent = row[c] ?? ''; tr.appendChild(td); });
+        table.appendChild(tr);
+      });
+      resultEl.appendChild(table);
+      if (data.transactions.length > 50) {
+        const note = document.createElement('p');
+        note.textContent = `Showing first 50 of ${data.transactions.length} rows.`;
+        resultEl.appendChild(note);
+      }
+    }
+  } catch (e) {
+    statusEl.textContent = `Request failed: ${e.message} (is the server running and CORS-reachable at ${serverUrl}?)`;
+    statusEl.className = 'status err';
+  }
+});
+</script>
+</body>
+</html>

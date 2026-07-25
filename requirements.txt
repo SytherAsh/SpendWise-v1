@@ -1,0 +1,13 @@
+fastapi>=0.118.0
+uvicorn>=0.23.0
+python-multipart>=0.0.5
+pandas>=2.0.0
+numpy>=1.26.0
+scipy>=1.11.0
+rapidfuzz>=3.0.0
+msoffcrypto-tool>=5.0.0
+openpyxl>=3.1.0
+xlrd>=2.0.1
+pyxlsb>=1.0.8
+supabase>=2.0.0
+python-dotenv>=1.0.0

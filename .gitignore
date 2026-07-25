@@ -11,3 +11,7 @@ __pycache__/
 
 .idea/
 .vscode/
+
+.pytest_cache/
+
+ml_service/tests/tmp_pipeline_outputs*/
